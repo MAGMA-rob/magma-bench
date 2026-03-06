@@ -23,8 +23,9 @@ class MagmaSingle(LocalSystem):
 
         # Connection check
         try:
-            response = requests.post(f"{self.base_url}/get_infos",data="{}",timeout=10)
+            response = requests.post(f"{self.base_url}/get_infos",json={},timeout=10)
             info = response.json()
+            print(info)
             c_name = info['commander']
         except:
             raise ValueError(f"Connection to the Magma Agent container impossible. Please verify the url : {self.base_url}")

@@ -23,7 +23,7 @@ class MagmaDual(LocalSystem):
 
         # Connection check
         try:
-            response = requests.post(f"{self.base_url}/get_infos",data="{}",timeout=10)
+            response = requests.post(f"{self.base_url}/get_infos",json={},timeout=10)
             info = response.json()
             c_name = info['commander']
             m_name = info['memorizer']

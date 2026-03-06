@@ -24,7 +24,7 @@ class GPTMagma(LocalSystem):
 
         #connection check
         try:
-            response = requests.post(f"{self.base_url}/get_infos",data="{}",timeout=10)
+            response = requests.post(f"{self.base_url}/get_infos",json={},timeout=10)
             info = response.json()
             m_name = info['memorizer']
         except:

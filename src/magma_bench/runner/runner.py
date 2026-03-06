@@ -41,6 +41,9 @@ class BenchmarkRunner():
         System_class : Type[System] = load_module_from_name(system_pkg, system_class_name)
         if "Magma" in system_class_name:
             class_specific_args["agent_url"] = magma_config.magma_agent_address
+        verifier_backend = magma_config.backends[magma_config.benchmark["backend_verifier"]]
+        class_specific_args.setdefault("backend_url",verifier_backend.endpoint) # TO DO: Dedicated option
+        class_specific_args.setdefault("backend_header",verifier_backend.headers) # TO DO: Dedicated option
         self.system = System_class(**class_specific_args)
 
         self.benchmarks = []
