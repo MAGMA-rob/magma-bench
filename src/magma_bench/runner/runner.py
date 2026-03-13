@@ -1,3 +1,5 @@
+from pygments.token import String
+from dataclasses import dataclass
 import magma_bench.system as system_pkg
 from magma_bench.system import System
 from magma_bench.builders import (
@@ -5,7 +7,7 @@ from magma_bench.builders import (
     BenchmarkLoader, ScenarioBuilder,
     Task, Stage
 )
-from magma_bench.results import ResultManager, ScenarioResult
+from magma_bench.results import ResultManager, ScenarioResult, StageResult
 from magma_bench.executor import ToolsEvalExecutor
 
 from magma_core.configs.config import MAGMAConfig
@@ -65,141 +67,166 @@ class BenchmarkRunner():
 
         return True
     
-    def _run_stage(self, scenario : Scenario, stage : Stage, task_attributes : Dict, instruction : Dict):
-        """Run the evaluation process for one inner-step"""
-        should_act = stage.should_act()
-        instruction.setdefault("timestamp",0)
 
-        running = False
-        success = False
-        END_OF_LOOP = False
-        end_of_action = False
-        step_cpt = 0
-        should_recover = stage.has_flag_recovery() or stage.has_flag_failure()
-
-        call_ac = {}
-        status_dict = {}
-        response_dict = {}
-        conversation = [instruction]
-        exe_result = []
-        reason = ""
+    
+    @dataclass
+    class StageCounters:
+        is_running_a_tool = False
+        planner_error_count = 0
+        step_counter = 0
+        end_of_action = False # is action terminated ?
         catastrophic = False
 
-        err=0
+    def _make_answer(self, author: str, content: Dict, timestep = 0):
+        """Return a json formated answer."""
+        return {'author':author, "content": str(content), "timestamp":timestep}
 
-        while not END_OF_LOOP:
 
-            if not running:
-                step_cpt+=1
 
+    def _run_stage(self, scenario : Scenario, stage : Stage, task_attributes : Dict, instruction : Dict) -> StageResult:
+        """Run the evaluation process for one inner-step"""
+
+        call_action = {} # functions calling stack
+        status_dict = {}
+        response_dict = {} # action + think + say stack
+
+        # returned values
+        stageResult = StageResult()
+        instruction.setdefault("timestamp",0)
+        stageResult.conversation = [instruction]
+
+        # stage counters
+        stageCounters = self.StageCounters()
+        should_recover = stage.has_flag_recovery() or stage.has_flag_failure()
+
+        end_of_loop = False
+        while not end_of_loop:
+
+            # make an action if no tool is running
+            if not stageCounters.is_running_a_tool:
+                stageCounters.step_counter+=1
                 # get model answer
-                response_dict = self.system.compute_answer(instruction,task_attributes)
-                model_answer = {'author':"model", "content":response_dict, "timestamp":0}
-                conversation.append(model_answer)
-                
+                response_dict = self.system.compute_answer(instruction, task_attributes)
+                model_answer = self._make_answer("model", response_dict)
+                stageResult.conversation.append(model_answer)
+                        
                 # process action
-                call_ac : Dict = response_dict.get("action",{})
-                if call_ac:
-                    if should_act:
-                        scenario.send_action(call_ac) 
-                        running = True
+                call_action : Dict = response_dict.get("action",{})
+                if call_action:
+                    if stage.should_act():
+                        scenario.send_action(call_action) 
+                        stageCounters.is_running_a_tool = True
                     else:
-                        end_of_action = True
-                        catastrophic = True
-                        exe_result.append(False)
-                        response_dict = {}
+                        stageCounters.end_of_action = True
+                        stageCounters.catastrophic = True
+                        stageResult.executions_result.append(False)
+                        response_dict.clear()
                 else:
-                    end_of_action = True
-                    exe_result.append(True)
+                    stageCounters.end_of_action = True
+                    stageResult.executions_result.append(True)
 
-            # execute step
+            # execute an env step
             tools_ended = scenario.execute_env_step()
             
-            # check if all steps of the actions are finished
+            # if all tools call are finished, manage planner error, env updating and go to next step
             if tools_ended:
+
+                # retry in case of a planning error or stop stage if too many planner errors
                 if any(tools_ended[0]['planning_error']):
-                    err+=1
+                    stageCounters.planner_error_count+=1
                     # We got a planning error here. We retry the same function
-                    self.tool_executor.ask_for_retry([0], err % 3 == 0)
-                    if err > 10:
-                        exe_result.append(True)
-                        return False, "The planning failed 10 times. The call is probably not good.", conversation, exe_result
+                    self.tool_executor.ask_for_retry([0], stageCounters.planner_error_count % 3 == 0)
+                    if stageCounters.planner_error_count > 10:
+                        stageResult.executions_result.append(True)
+                        stageResult.success = False
+                        stageResult.explanation = "The planning failed 10 times. The call is probably not good."
+                        return stageResult
                     tools_ended = {}
                     continue
 
-                # Build the status 
-                status_dict = build_model_return_from_executor(call_ac, tools_ended[0]['success'], tools_ended[0]['reason'])
-                exe_result.extend(tools_ended[0]['success'])
+                # build the status 
+                status_dict = build_model_return_from_executor(call_action, tools_ended[0]['success'], tools_ended[0]['reason'])
+                stageResult.executions_result.extend(tools_ended[0]['success'])
 
+                # update stage attributes
                 if not should_recover and not stage.has_flag_failure():
                     att_modif = tools_ended[0].get('att_modif',[])
                     if len(att_modif)>0:
                         apply_att_modif(task_attributes, att_modif)
 
-                running = False
-                end_of_action = True
+                stageCounters.is_running_a_tool = False
+                stageCounters.end_of_action = True
 
-            # check for success
-            if end_of_action:
-                # Verify if the stage is valid
-                if catastrophic:
-                    success = False
-                    reason = 'Launched a tool on a text-only stage'
+            # manage env status and returned messages on stage end
+            if stageCounters.end_of_action:
+                # Verify if the stage is still valid
+                if stageCounters.catastrophic:
+                    stageResult.success = False
+                    stageResult.explanation = 'Launched a tool on a text-only stage'
                 else:
                     try:
-                        success, reason = scenario.evaluate_stage(stage,response_dict)
+                        stageResult.success, stageResult.explanation = scenario.evaluate_stage(stage, response_dict)
                     except:
-                        success, reason = False, "Exception due to no tool call"
-                        
-                    if call_ac != {}:
+                        stageResult.success, stageResult.explanation = False, "Exception due to no tool call"
+
+                    # if a tool where called  
+                    if call_action != {}:
                         if status_dict == {}:
                             raise RuntimeError("Empty status dict while having executed an action")
                         
-                        if success and (should_recover or stage.has_flag_failure()):
+                        # update env status with failure
+                        if stageResult.success and (should_recover or stage.has_flag_failure()):
                             # If the stage is successfull + marked as recovery but we haven't done it yet.
                             status_dict = build_fake_execution_fail(
-                                call_ac, status_dict,
+                                call_action, status_dict,
                                 stage.force_recovery if stage.has_flag_recovery() else stage.force_failure)
                             self.tool_executor.ask_for_retry([0],False,auto_compute=False)
-                            step_cpt-=1
-                            success = False
+                            stageCounters.step_counter-=1
+                            stageResult.success = False
                             if not should_recover: #only in force_failure, count the number of model errors before informing about the failure case
-                                err+=1
-                                if err > 4:
-                                    return False, "The models persist in its error more than 4 times", conversation, exe_result
+                                stageCounters.planner_error_count+=1
+                                if stageCounters.planner_error_count > 4:
+                                    stageResult.success = False
+                                    stageResult.explanation = "The models persist in its error more than 4 times"
+                                    return stageResult
                             else:
-                                err = 0
+                                stageCounters.planner_error_count = 0
                             should_recover = False
                             
-                        
-                        instruction = {'author':"status", "content":str(status_dict), "timestamp":0}
-                        conversation.append(instruction)
+                        # build returned instruction
+                        instruction = self._make_answer("status", status_dict)
+                        stageResult.conversation.append(instruction)
+
+                    # if no tools where called, check model text response
                     elif stage.has_flag_failure() and not should_recover:
                         d = self.tool_executor.verif_complementary_bench(
                             response_dict['say'], None, 
                             f"The model must inform the user that an error happens" 
                             #this error happens : {stage.force_failure}. It is not strict, the model can just inform of the failure state."
                             )     
-                        success, reason = d['verdict'], d['explanation']
+                        stageResult.success, stageResult.explanation = d['verdict'], d['explanation']
 
-                    call_ac = {}
-                    catastrophic=False
-                if not success:
-                    if step_cpt >= stage.max_agents_step:
-                        break
-                
-                running=False
-                end_of_action = False
+                    call_action.clear()
+                    stageCounters.catastrophic = False
 
-                if success:
+                # check user response in case of stage sucess                
+                if stageResult.success:
+                    stageCounters.is_running_a_tool = False
+                    stageCounters.end_of_action = False
+                    # check if user got a valid answer
                     if stage.has_flag_answer_to_user():
+                        # get model answer
                         response_dict = self.system.compute_answer(instruction,task_attributes)
-                        conversation.append({'author':"model", "content":response_dict, "timestamp":0})
-                        success = (response_dict['action'] == {})
+                        answer = self._make_answer("model", response_dict)
+                        stageResult.conversation.append(answer)
+                        stageResult.success = (response_dict['action'] == {})
+                    end_of_loop = True
+                else:
+                    if stageCounters.step_counter >= stage.max_agents_step:
+                        end_of_loop = True
+                
 
-                    END_OF_LOOP = True
-
-        return success, reason, conversation, exe_result
+        return stageResult
     
     def _run_scenario(self, scenario : Scenario, task_decomp : Dict[str,List[str]]):
         nb_tasks = scenario.nb_tasks
@@ -207,30 +234,34 @@ class BenchmarkRunner():
 
         self.system.init_task(init_elements)
 
-        for i in tqdm(range(self.num_try), desc="Evaluation Tries", position=1, leave=False):
+        for try_index in tqdm(range(self.num_try), desc="Evaluation Tries", position=1, leave=False):
             scenario_result = ScenarioResult(scenario.id, scenario.evaluated_criteria, task_decomp)
-            for j in tqdm(range(nb_tasks), desc="Task", position=2, leave=False):
+            for task_id in tqdm(range(nb_tasks), desc="Task", position=2, leave=False):
                 self.system.reset_step()
-                task : Task = scenario.get_task(j)
+                task : Task = scenario.get_task(task_id)
                 task_attributes = scenario.get_init_elements()["attributes"]
-                conv = []
-                suc = False
+                conversation = []
+                success = False
                 for stage in task.stages:
                     instruction = stage.instruction
                     if instruction is None:
-                        if suc and conv[-1]["author"] == "status": instruction = conv[-1]
+                        if success and conversation[-1]["author"] == "status": instruction = conversation[-1]
                         else: instruction = stage.get_default_instruction()
-                    suc, r, conv, exe = self._run_stage(scenario,stage,task_attributes,instruction)
+                    stage_result = self._run_stage(scenario,stage,task_attributes,instruction)
                     scenario_result.add_result(
-                        task,conv,suc,
+                        task,
+                        stage_result.conversation,
+                        stage_result.success,
                         stage.has_flag_failure() or stage.has_flag_recovery(),
-                        exe,r,stage.keys_evaluator
+                        stage_result.executions_result,
+                        stage_result.explanation,
+                        stage.keys_evaluator
                     )
 
                     if stage.should_reset_env():
                         scenario.env_reset()
 
-                scenario.save_video(f"{scenario.name}-{i}-{j}")
+                scenario.save_video(f"{scenario.name}-{try_index}-{task_id}")
 
             self.result_manager.push_scenario_result(scenario_result)
 
