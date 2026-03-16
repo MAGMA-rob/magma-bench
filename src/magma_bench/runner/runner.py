@@ -34,11 +34,14 @@ class BenchmarkRunner():
     result_manager : ResultManager
     tool_executor : ToolsEvalExecutor
 
+    _num_variations : int
+
     def __init__(
             self,
             system_class_name : str,
             magma_config : MAGMAConfig,
             class_specific_args : Dict,
+            variations : int = 1
         ) -> None:
         System_class : Type[System] = load_module_from_name(system_pkg, system_class_name)
         if "Magma" in system_class_name:
@@ -53,7 +56,13 @@ class BenchmarkRunner():
 
         self.result_manager = ResultManager(self.output_path, magma_config.benchmark["logs"], magma_config.benchmark["num_eval"]==1)
         worker = LMWorker(magma_config.backends[magma_config.benchmark["backend_verifier"]])
-        self.tool_executor : ToolsEvalExecutor = ToolsEvalExecutor(magma_config.magma_planner_address, worker, nb_env=1)
+
+        self._num_variations = variations
+
+        self.tool_executor : ToolsEvalExecutor = ToolsEvalExecutor(
+            magma_config.magma_planner_address, 
+            worker, nb_env=1, 
+            randomized=True)
 
         self.num_try = magma_config.benchmark["num_eval"]
     
@@ -237,31 +246,36 @@ class BenchmarkRunner():
         for try_index in tqdm(range(self.num_try), desc="Evaluation Tries", position=1, leave=False):
             scenario_result = ScenarioResult(scenario.id, scenario.evaluated_criteria, task_decomp)
             for task_id in tqdm(range(nb_tasks), desc="Task", position=2, leave=False):
-                self.system.reset_step()
-                task : Task = scenario.get_task(task_id)
-                task_attributes = scenario.get_init_elements()["attributes"]
-                conversation = []
-                success = False
-                for stage in task.stages:
-                    instruction = stage.instruction
-                    if instruction is None:
-                        if success and conversation[-1]["author"] == "status": instruction = conversation[-1]
-                        else: instruction = stage.get_default_instruction()
-                    stage_result = self._run_stage(scenario,stage,task_attributes,instruction)
-                    scenario_result.add_result(
-                        task,
-                        stage_result.conversation,
-                        stage_result.success,
-                        stage.has_flag_failure() or stage.has_flag_recovery(),
-                        stage_result.executions_result,
-                        stage_result.explanation,
-                        stage.keys_evaluator
-                    )
 
-                    if stage.should_reset_env():
-                        scenario.env_reset()
+                for variation_index in tqdm(range(self._num_variations), desc="Variation", position=3, leave=False):
+                    self.system.reset_step()
+                    self.tool_executor.randomizer.initialize_randomizer(task_ref=self.tool_executor.task_ref)
 
-                scenario.save_video(f"{scenario.name}-{try_index}-{task_id}")
+                    task : Task = scenario.get_task(task_id)
+                    task_attributes = scenario.get_init_elements()["attributes"]
+                    
+                    conversation = []
+                    success = False
+                    for stage in task.stages:
+                        instruction = stage.instruction
+                        if instruction is None:
+                            if success and conversation[-1]["author"] == "status": instruction = conversation[-1]
+                            else: instruction = stage.get_default_instruction()
+                        stage_result = self._run_stage(scenario,stage,task_attributes,instruction)
+                        scenario_result.add_result(
+                            task,
+                            stage_result.conversation,
+                            stage_result.success,
+                            stage.has_flag_failure() or stage.has_flag_recovery(),
+                            stage_result.executions_result,
+                            stage_result.explanation,
+                            stage.keys_evaluator
+                        )
+
+                        if stage.should_reset_env():
+                            scenario.env_reset()
+                        
+                        scenario.save_video(f"{scenario.name}-try-{try_index}-task-{task_id}-var-{variation_index}")
 
             self.result_manager.push_scenario_result(scenario_result)
 

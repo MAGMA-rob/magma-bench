@@ -29,6 +29,7 @@ def parse_args():
         help="Which backend instance to use for the verifier."
     )
     parser.add_argument("-n", "--num_eval", type=int, help="Number of evaluation per instruction.")
+    parser.add_argument("-nv", "--num_variations", type=int, help="Number of tools and attributes randomization per task.")
     parser.add_argument(
         "--magma_agent_address", '-mas',
         type=str,
@@ -106,6 +107,7 @@ def main(args : argparse.Namespace):
         args.system, 
         magma_config=magma_config,
         class_specific_args=args.extra,
+        variations=args.num_variations
     )
     runner.load_benchmark(args.criteria, args.scenarios)
 
