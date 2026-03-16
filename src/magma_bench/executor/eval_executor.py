@@ -4,6 +4,7 @@
 from typing import Dict, List, Union, Optional, Tuple
 from collections import OrderedDict
 from dataclasses import dataclass
+from magma_core.base.tasks.base_task import BaseTask
 import torch, json
 from mani_skill.utils.wrappers.record import RecordEpisode
 
@@ -53,8 +54,8 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
    
     ################ public function
 
-    def initialize(self, task_name: str, task_arguments: Dict, build_first_stage : bool = True, obs_mode : str = "state_dict", video_path : str = "none") -> DefaultEnv:
-        self.env = super().initialize(task_name, task_arguments, build_first_stage, obs_mode)
+    def initialize(self, task_ref: BaseTask, build_first_stage: bool = True, obs_mode: str = "state_dict", video_path : str = "none") -> DefaultEnv:
+        self.env = super().initialize(task_ref, build_first_stage, obs_mode)
         if video_path != "none":
             self.env = RecordEpisode(
                     self.env,
@@ -62,7 +63,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                     save_trajectory=False,
                     save_video=True,
                     source_type="MAGMA-BENCHMARK",
-                    source_desc=f"Videos of the execution on {task_name} benchmark",
+                    source_desc=f"Videos of the execution on {task_ref.name} benchmark",
                     video_fps=30,
                     save_on_reset=False
             )
