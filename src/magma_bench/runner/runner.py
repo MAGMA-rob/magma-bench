@@ -261,6 +261,7 @@ class BenchmarkRunner():
                         if instruction is None:
                             if success and conversation[-1]["author"] == "status": instruction = conversation[-1]
                             else: instruction = stage.get_default_instruction()
+                        instruction = json.loads(self.tool_executor.randomizer.traduce_attributes_to_llm(json.dumps(instruction)))
                         stage_result = self._run_stage(scenario,stage,task_attributes,instruction)
                         scenario_result.add_result(
                             task,
