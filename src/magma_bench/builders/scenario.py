@@ -6,6 +6,8 @@ from magma_bench.executor import ToolsEvalExecutor
 from .details import Task, Stage
 from magma_bench.evalutations import evaluate_env_success
 
+from magma_scenarios import load_preset
+
 @dataclass
 class ScenarioConfig:
 
@@ -51,9 +53,11 @@ class Scenario():
         self.seed = seed
         self.tool_executor = tool_executor_ref
 
+        Cls_Task = load_preset(task_name)
+        task_ref = Cls_Task()
+
         self.env = self.tool_executor.initialize(
-            task_name=task_name,
-            task_arguments={},
+            task_ref=task_ref,
             video_path=video_output_path,
             build_first_stage=False,
             obs_mode=obs_mode
