@@ -30,29 +30,28 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
     _eval_envs : Dict[int,ToolInfos]
     _precedent_env_state : Dict[int, SavedEnvState]
 
-    # Debugging (will skip text only stage)
-    skip_text_only : bool
-
     def __init__(
             self,
             planner_endpoint : str,
-            worker : Optional[LMWorker],
+            worker : LMWorker,
             nb_env : int = 1,
-            randomized : bool = False,
-            skip_text_only : bool = False,
+            randomize_variation : int = 0,
         ):
-
-        if skip_text_only is True:
-            print("[EXECUTOR] Warning : Passing the executor to Debugging mode (skipping text-only stage). If you are using something else than the Tool Tester script, this could lead to unpredicted behavior.")
-
-        self.skip_text_only = skip_text_only
-        
-        super().__init__(nb_env, planner_endpoint=planner_endpoint, ollama_worker=worker, randomized=randomized)
+        super().__init__(
+            nb_env,
+            planner_endpoint=planner_endpoint,
+            ollama_worker=worker,
+            nb_randomization=randomize_variation
+        )
 
         self._eval_envs : Dict[int,ToolInfos] = {}
         self._precedent_env_state = {}
    
     ################ public function
+
+    def set_randomizer_index(self, id : int):
+        if self.randomized:
+            self.randomizer.set_variation_index(id)
 
     def initialize(self, task_ref: BaseTask, build_first_stage: bool = True, obs_mode: str = "state_dict", video_path : str = "none") -> DefaultEnv:
         self.env = super().initialize(task_ref, build_first_stage, obs_mode)
@@ -149,6 +148,8 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                 # print("=========")            
 
         if judge_verif:
+            if self.randomized:
+                judge_verif = self.randomizer.traduce_attributes_to_llm(judge_verif)
             payload = JudgePayload(rule=judge_verif, model_answer=model_say, id=0)
             future = self.worker.submit(payload, callback=None)
             i, judge_str = future.result()
@@ -189,11 +190,6 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                 new_id = stage_id+1
                 st = self.env.get_state_dict().copy()
                 self._pass_to_the_next_stage(stage_id, env_ids, st)
-
-                if self.skip_text_only: #skip test-only stage
-                    while self.task_ref.is_stage_text_only(new_id):
-                        print(f"[EXECUTOR] Skip Stage {new_id}")
-                        new_id+=1
 
                 situation = self.get_init_situation(new_id)
                 print(f"NEXT STAGE : {new_id} with instruction {situation.instruction.get_content()}")
@@ -251,10 +247,6 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                 stage_id = 0
                 stage_log_length = 0
                 logs = []
-                if self.skip_text_only: #skip test-only stage
-                    while self.task_ref.is_stage_text_only(stage_id):
-                        print(f"[EXECUTOR] Skip Stage {stage_id}")
-                        stage_id+=1
             
             # FAUT QUE JARRIVE A DETERMINER ICI SI CEST UN DEBUT DE STAGE OU NON
             if func_name:

@@ -1,17 +1,18 @@
 from typing import List, Dict, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import os, json
 
 from magma_bench.builders import Task
 
 @dataclass
 class StageResult:
-    conversation : List[Dict]
-    success : bool
-    explanation : str
-    exe_score : float # Exe score represent the % of good call (good syntax) that has been passed. [0,1]
-    was_recovery : bool
-    keys_evaluator : List[str]
+    success : bool = False
+    conversation : List[Dict] = field(default_factory = lambda: ([]))
+    explanation : str = ""
+    exe_score : float = 0 # Exe score represent the % of good call (good syntax) that has been passed. [0,1]
+    was_recovery : bool = False
+    keys_evaluator : List[str] = field(default_factory = lambda: ([]))
+    executions_result : List[bool] = field(default_factory = lambda: ([]))
 
 class CriterionScore:
 

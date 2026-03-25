@@ -105,7 +105,7 @@ def main(args : argparse.Namespace):
     runner = BenchmarkRunner(
         args.system, 
         magma_config=magma_config,
-        class_specific_args=args.extra,
+        class_specific_args=args.extra
     )
     runner.load_benchmark(args.criteria, args.scenarios)
 
