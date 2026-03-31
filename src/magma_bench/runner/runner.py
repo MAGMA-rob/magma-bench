@@ -63,8 +63,6 @@ class BenchmarkRunner():
             worker, nb_env=1, 
             randomize_variation=self.num_try
         )
-
-        
     
     def load_benchmark(self, criteria, scenario) -> bool:
         """Load one benchmark to evaluate the system on"""
@@ -75,8 +73,6 @@ class BenchmarkRunner():
         self._benchmark_configs = BenchmarkLoader.load(criteria, scenario)
 
         return True
-    
-
     
     @dataclass
     class StageCounters:
@@ -90,7 +86,39 @@ class BenchmarkRunner():
         """Return a json formated answer."""
         return {'author':author, "content": str(content), "timestamp":timestep}
 
+    def _get_last_status_instruction(self, conversation: List[Dict]) -> Union[Dict, None]:
+        """
+        Return the latest status message produced during a stage execution.
+        """
+        for message in reversed(conversation):
+            if message.get("author") == "status":
+                return message
+        return None
 
+    def _resolve_stage_instruction(
+            self,
+            stage: Stage,
+            previous_stage_success: bool,
+            previous_status_instruction: Union[Dict, None],
+        ) -> Union[Dict, None]:
+        """
+        Resolve which instruction should start the current benchmark stage.
+
+        If the stage has no explicit instruction, we reuse the previous status
+        when the previous stage succeeded. If no reusable status exists, we
+        fall back to ``default_instruction`` when provided. Otherwise the stage
+        is skipped so the runner can continue until it finds a runnable stage.
+        """
+        if stage.instruction is not None:
+            return stage.instruction
+
+        if previous_stage_success and previous_status_instruction is not None:
+            return previous_status_instruction
+
+        if stage.default_instruction is not None:
+            return stage.default_instruction
+
+        return None
 
     def _run_stage(self, scenario : Scenario, stage : Stage, task_attributes : Dict, instruction : Dict) -> StageResult:
         """Run the evaluation process for one inner-step"""
@@ -98,6 +126,7 @@ class BenchmarkRunner():
         call_action = {} # functions calling stack
         status_dict = {}
         response_dict = {} # action + think + say stack
+        error_state = stage.get_error_state()
 
         # returned values
         stageResult = StageResult()
@@ -123,7 +152,7 @@ class BenchmarkRunner():
                 call_action : Dict = response_dict.get("action",{})
                 if call_action:
                     if stage.should_act():
-                        scenario.send_action(call_action) 
+                        scenario.send_action(call_action, error_state) 
                         stageCounters.is_running_a_tool = True
                     else:
                         stageCounters.end_of_action = True
@@ -144,7 +173,7 @@ class BenchmarkRunner():
                 if any(tools_ended[0]['planning_error']):
                     stageCounters.planner_error_count+=1
                     # We got a planning error here. We retry the same function
-                    self.tool_executor.ask_for_retry([0], stageCounters.planner_error_count % 3 == 0)
+                    self.tool_executor.ask_for_retry([0], stageCounters.planner_error_count % 3 == 0, error_state)
                     if stageCounters.planner_error_count > 10:
                         stageResult.executions_result.append(True)
                         stageResult.success = False
@@ -188,8 +217,9 @@ class BenchmarkRunner():
                             # If the stage is successfull + marked as recovery but we haven't done it yet.
                             status_dict = build_fake_execution_fail(
                                 call_action, status_dict,
-                                stage.force_recovery if stage.has_flag_recovery() else stage.force_failure)
-                            self.tool_executor.ask_for_retry([0],False,auto_compute=False)
+                                stage.get_error_flag()
+                            )
+                            self.tool_executor.ask_for_retry([0],False,auto_compute=False, error_state=error_state)
                             stageCounters.step_counter-=1
                             stageResult.success = False
                             if not should_recover: #only in force_failure, count the number of model errors before informing about the failure case
@@ -262,14 +292,21 @@ class BenchmarkRunner():
 
                 task : Task = scenario.get_task(task_id)
                 task_attributes = scenario.get_init_elements()["attributes"]
-                
-                conversation = []
-                success = False
+
+                previous_stage_success = False
+                previous_status_instruction = None
                 for stage in task.stages:
-                    instruction = stage.instruction
+                    instruction = self._resolve_stage_instruction(
+                        stage,
+                        previous_stage_success,
+                        previous_status_instruction,
+                    )
                     if instruction is None:
-                        if success and conversation[-1]["author"] == "status": instruction = conversation[-1]
-                        else: instruction = stage.get_default_instruction()
+                        # No explicit instruction, no fallback and no reusable status: 
+                        # skip this chained stage and move on until we reach a runnable one.
+                        previous_stage_success = False
+                        previous_status_instruction = None
+                        continue
 
                     instruction = json.loads(self.tool_executor.randomizer.traduce_attributes_to_llm(json.dumps(instruction)))
 
@@ -286,6 +323,9 @@ class BenchmarkRunner():
                         stage_result.explanation,
                         stage.keys_evaluator
                     )
+
+                    previous_stage_success = stage_result.success
+                    previous_status_instruction = self._get_last_status_instruction(stage_result.conversation)
 
                     if stage.should_reset_env():
                         scenario.env_reset()

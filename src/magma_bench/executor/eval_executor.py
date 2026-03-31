@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BSD-2-Clause
 # Copyright (c) 2026, Loan Bernat
 
-from typing import Dict, List, Union, Optional, Tuple
+from typing import Dict, List, Union, Optional, Tuple, Any
 from collections import OrderedDict
 from dataclasses import dataclass
 from magma_core.base.tasks.base_task import BaseTask
@@ -10,7 +10,7 @@ from mani_skill.utils.wrappers.record import RecordEpisode
 
 from magma_core.base.envs import DefaultEnv
 from magma_core.base.executor import ToolsBaseExecutor
-from magma_core.base.data_structures import ToolInfos, Log
+from magma_core.base.data_structures import ToolInfos, Log, ActiveStageErrorState
 from magma_core.workers import LMWorker
 from magma_core.protocol.payload.user_sim_payload import JudgePayload
 from magma_core.utils.global_utils import extract_env_state_val, batch_set_value
@@ -89,7 +89,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
         else:
             raise RuntimeError(f"Unknow log ref structure. Need either a list of dict, with dict with 'action', 'content' or 'function' field. OR a list of list of dict (to show multiple valible possibility)")
     
-    def ask_for_retry(self, desired_env_ids: List[int], reset_joint_to_env_default : bool, auto_compute : bool = True):
+    def ask_for_retry(self, desired_env_ids: List[int], reset_joint_to_env_default : bool, error_state : ActiveStageErrorState, auto_compute : bool = True):
         """
         Ask the environment to re-try the last action for the desired_env_ids.
         Allows to handle when there is a planning error.
@@ -114,7 +114,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
         action = self.step()
         _ , _, _, _,_ = self.env.step(action)
         if auto_compute:
-            self.compute_actions(calls)
+            self.compute_actions(calls, error_state=error_state)
 
 
     def verif_complementary_bench(
@@ -198,6 +198,8 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                     # Specific modifications
                     self._eval_envs[i].current_task_stage = new_id
                     self._eval_envs[i].stage_log_start_idx = len(self._eval_envs[i].logs)
+                    # A new stage must resample its own active error profile.
+                    self._eval_envs[i].error_state = {}
 
                 self.env.set_state_dict(st)
             else:
@@ -214,8 +216,18 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             if tool_infos.current_task_stage > stage: stage = tool_infos.current_task_stage
         
         return self.get_task_attributes(stage)
+
+    def _initialize_stage_error_state(
+            self,
+            stage_id: int,
+            error_state: ActiveStageErrorState,
+            obs: Dict,
+            env_id: int,
+            agent_id: int = 0,
+        ) -> ActiveStageErrorState:
+        return error_state
     
-    def compute_actions(self, tools_call : Dict):
+    def compute_actions(self, tools_call : Dict, error_state : Optional[ActiveStageErrorState] = None):
         """
         Take a batch of tools_calls. It's a dict where each key is a node_id associate with a dict.
         In case of GENERATION mode, the value dict contains 'tool' (the action dict) and 'src_id' (the parent node_id).
@@ -247,14 +259,15 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                 stage_id = 0
                 stage_log_length = 0
                 logs = []
+            active_stage_error_state = {} if error_state is None else error_state
             
-            # FAUT QUE JARRIVE A DETERMINER ICI SI CEST UN DEBUT DE STAGE OU NON
             if func_name:
                 tool_infos = self._compute_single_tool(
                     func_name,
                     params,
                     env_id,
                     obs,
+                    active_stage_error_state,
                     current_node_step=0,
                     stage_id=stage_id,
                     node_id=env_id,
@@ -267,6 +280,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                     actions = func,
                     env_id=env_id,
                     obs=obs,
+                    error_state=active_stage_error_state,
                     stage_id=stage_id,
                     current_node_step=0,
                     node_id=env_id,
@@ -316,7 +330,13 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                     else:
                         planning_error.append(False)
 
-                out[env_infos.node_id] = {'success':results, "reason":mess, "att_modif" : att_modif, "planning_error":planning_error}
+                out[env_infos.node_id] = {
+                    'success':results,
+                    "reason":mess,
+                    "att_modif" : att_modif,
+                    "planning_error":planning_error,
+                    "error_description": env_infos.get_error_descriptions(),
+                }
                 env_infos.tool_robots = []
 
         return self.randomizer.traduce_end_eval(out) if self.randomized else out

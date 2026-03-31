@@ -5,7 +5,8 @@ from pathlib import Path
 from magma_bench.executor import ToolsEvalExecutor
 from .details import Task, Stage
 from magma_bench.evalutations import evaluate_env_success
-
+from magma_core.base.data_structures import ActiveStageErrorState
+from magma_core.base.tasks import BaseBenchmarkTask
 from magma_scenarios import load_preset
 
 @dataclass
@@ -56,6 +57,9 @@ class Scenario():
         Cls_Task = load_preset(task_name)
         task_ref = Cls_Task()
 
+        if not isinstance(task_ref, BaseBenchmarkTask):
+            raise ValueError(f"Benchmark tasks must inherits from a BaseBenchmarkTask class. It's not the case of {task_ref.__class__.__name__}")
+
         self.env = self.tool_executor.initialize(
             task_ref=task_ref,
             video_path=video_output_path,
@@ -66,6 +70,26 @@ class Scenario():
             self.saving_video = True
         else:
             self.saving_video = False
+
+        # Verify that all used errors exist in the BenchmarkTask
+        self._validate_runtime_error_injections(task_ref)
+
+    def _validate_runtime_error_injections(self, task_ref : BaseBenchmarkTask):
+        """
+        Verify that every runtime_error declared in benchmark JSON can be
+        resolved against the benchmark task error registry.
+        """
+        for task in self.tasks:
+            for stage in task.stages:
+                error_state = stage.get_error_state()
+                if not error_state:
+                    continue
+                try:
+                    task_ref.get_active_stage_error(0, error_state)
+                except Exception as exc:
+                    raise ValueError(
+                        f"Task {task.id}, stage {stage.id}: invalid runtime_error injection. {exc}"
+                    ) from exc
 
     def save_video(self, video_name):
         if self.saving_video and self.env is not None:
@@ -134,10 +158,10 @@ class Scenario():
     
     ########## EXECUTION
     
-    def send_action(self, action : Dict):
+    def send_action(self, action : Dict, error_state : ActiveStageErrorState):
         """Send the tool call to the evaluation env"""
         tool_calls = {0 : action}
-        self.tool_executor.compute_actions(tool_calls)
+        self.tool_executor.compute_actions(tool_calls, error_state)
         return True
     
     def execute_env_step(self) -> Dict:
