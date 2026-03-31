@@ -3,7 +3,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from magma_bench.executor import ToolsEvalExecutor
-from .details import Task, Stage
+from .task import Task
+from .stage import Stage
 from magma_bench.evalutations import evaluate_env_success
 from magma_core.base.data_structures import ActiveStageErrorState
 from magma_core.base.tasks import BaseBenchmarkTask
