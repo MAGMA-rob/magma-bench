@@ -41,6 +41,11 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             nb_env : int = 1,
             randomize_variation : int = 0,
         ):
+        if randomize_variation == 1:
+            # That's mean that we have no randomization (like just one env)
+            # So we set to 0 to deactivate randomization
+            randomize_variation = 0
+        
         super().__init__(
             nb_env,
             planner_endpoint=planner_endpoint,
@@ -128,6 +133,10 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
         action = self.step()
         _ , _, _, _,_ = self.env.step(action)
         if auto_compute:
+            print("--")
+            print('auto-compute')
+            print(calls)
+            print("---")
             self.compute_actions(calls, error_state=error_state)
 
 
@@ -179,9 +188,18 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
         else:
             judge_dict = {"verdict": True, "explanation":""}
 
+        explanation_parts = []
+        judge_explanation = judge_dict.get("explanation", "").strip()
+        if judge_explanation:
+            explanation_parts.append(judge_explanation)
+
+        log_reason = log_reason.strip()
+        if log_reason:
+            explanation_parts.append(log_reason)
+
         return {
             "verdict" : judge_dict.get("verdict",True) and log_verdict,
-            "explanation" : judge_dict.get("explanation","") + " - " + log_reason
+            "explanation" : " - ".join(explanation_parts)
         }
 
     def check_env_state(self, obs : Dict):

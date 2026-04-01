@@ -18,12 +18,12 @@ from magma_core.workers import LMWorker
 
 from typing import Dict, List, Type, Union
 from tqdm import tqdm
-import os, json
+import os, json, copy
 from datetime import datetime
 
 class BenchmarkRunner():
     """
-    Main class of the benchmark. ALlows to initialize and runs evaluation on multiple benchmark for a given system
+    Main class of the benchmark. Allows to initialize and runs evaluation on multiple benchmark for a given system
     """
 
     # reference to the system to evaluate
@@ -53,6 +53,8 @@ class BenchmarkRunner():
         self.benchmarks = []
         self.output_path = os.path.join(magma_config.benchmark["save_dir"],self.system.system_name, datetime.now().strftime("%m-%d_%H-%M"))
 
+        self.per_task_log = magma_config.benchmark["logs"]
+        print(self.per_task_log)
         self.result_manager = ResultManager(self.output_path, magma_config.benchmark["logs"], magma_config.benchmark["num_eval"]==1)
         worker = LMWorker(magma_config.backends[magma_config.benchmark["backend_verifier"]])
 
@@ -84,7 +86,7 @@ class BenchmarkRunner():
 
     def _make_answer(self, author: str, content: Dict, timestep = 0):
         """Return a json formated answer."""
-        return {'author':author, "content": str(content), "timestamp":timestep}
+        return {'author':author, "content": copy.deepcopy(content), "timestamp":timestep}
 
     def _get_last_status_instruction(self, conversation: List[Dict]) -> Union[Dict, None]:
         """
@@ -198,9 +200,13 @@ class BenchmarkRunner():
             # manage env status and returned messages on stage end
             if stageCounters.end_of_action:
                 # Verify if the stage is still valid
+                stageCounters.is_running_a_tool = False
+                stageCounters.end_of_action = False
+
                 if stageCounters.catastrophic:
                     stageResult.success = False
                     stageResult.explanation = 'Launched a tool on a text-only stage'
+                    stageCounters.catastrophic = False
                 else:
                     try:
                         stageResult.success, stageResult.explanation = scenario.evaluate_stage(stage, response_dict, obs)
@@ -250,8 +256,6 @@ class BenchmarkRunner():
 
                 # check user response in case of stage sucess                
                 if stageResult.success:
-                    stageCounters.is_running_a_tool = False
-                    stageCounters.end_of_action = False
                     # check if user got a valid answer
                     if stage.has_flag_answer_to_user():
                         # get model answer
@@ -281,9 +285,20 @@ class BenchmarkRunner():
         nb_tasks = scenario.nb_tasks
 
         for try_index in tqdm(range(self.num_try), desc="Evaluation Tries", position=1, leave=False):
-            scenario_result = ScenarioResult(scenario.id, scenario.evaluated_criteria)
-            # Here we change the runtimeRandomizer
+            try_number = try_index + 1
+            try_output_path = None
+            if self.per_task_log:
+                try_output_path = self.result_manager.get_try_output_path(scenario.id, try_number)
+
+            # Select the indexed benchmark variation before collecting any
+            # try-level metadata or exposing tools/attributes to the system.
             self.tool_executor.set_randomizer_index(try_index)
+            scenario_result = ScenarioResult(
+                scenario.id,
+                scenario.evaluated_criteria,
+                try_number=try_number,
+                randomization_info=self.tool_executor.get_try_randomization_info(),
+            )
             init_elements = scenario.get_init_elements()
             self.system.init_task(init_elements)
             
@@ -323,6 +338,9 @@ class BenchmarkRunner():
                         scenario.env_reset()
                     
                     scenario.save_video(f"{scenario.name}-try-{try_index}-task-{task_id}")
+
+                if self.per_task_log and try_output_path is not None:
+                    scenario_result.export_task_log(task, try_output_path)
 
             self.result_manager.push_scenario_result(scenario_result)
 

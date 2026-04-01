@@ -2,37 +2,65 @@ import json
 import os
 from typing import Any, Dict, Optional
 
-from .metrics import BenchmarkMetrics, ScenarioMetrics, TaskMetrics
+from .metrics import BenchmarkMetrics, ScenarioMetrics, TaskMetrics, compute_task_metrics
 from .metrics_scenario import ScenarioResult, TaskRecord
 
 # Formatting for the export
 
+def _compact_secondary_metrics(task_metrics: TaskMetrics) -> Dict[str, str]:
+    return {
+        criterion: f"{counter.success} / {counter.reached}"
+        for criterion, counter in task_metrics.secondary.items()
+    }
+
+
 def _build_task_log(task_record: TaskRecord, task_metrics: TaskMetrics) -> Dict[str, Any]:
-    """Build the detailed per-task log payload kept in `logs/<task_id>.json`."""
+    """Build the compact per-task log payload kept in `logs/<task_id>.json`."""
     return {
         "header": {
-            "counts": {
-                "task_horizon": task_record.task_horizon,
-                "length_bucket": task_record.length_bucket,
-                "stage_count": len(task_record.stage_records),
-                "reached_stage_count": task_metrics.reached_stage_count,
-                "skipped_stage_count": task_metrics.skipped_stage_count,
-                "completed_prefix_horizon": task_metrics.primary.completed_prefix_horizon,
-            },
-            "primary_metrics": {
-                "task_success": task_metrics.primary.task_success,
-                "goal_completion": task_metrics.primary.goal_completion_ratio * 100,
-            },
-            "secondary_metrics": {
-                criterion: counter.to_dict()
-                for criterion, counter in task_metrics.secondary.items()
-            },
-            "auxiliary_metrics": {
-                "tool_accuracy": task_metrics.tool_accuracy,
-            },
+            "task_success": task_metrics.primary.task_success,
+            "goal_completion": task_metrics.primary.goal_completion_ratio * 100,
+            "secondary_metrics": _compact_secondary_metrics(task_metrics),
         },
-        "stage": [record.to_log_dict() for record in task_record.stage_records],
+        "stage": [
+            {
+                "success": record.success,
+                "verification_log": _normalize_stage_reason(record),
+                "conversation": [_export_conversation_message(message) for message in record.conversation],
+            }
+            for record in task_record.stage_records
+        ],
     }
+
+
+def _normalize_stage_reason(task_record) -> str:
+    reason = str(task_record.explanation or "").strip()
+    if reason:
+        return reason
+    return "Stage succeeded." if task_record.success else "Stage failed."
+
+
+def _export_conversation_message(message: Dict[str, Any]) -> Dict[str, Any]:
+    exported_message = dict(message)
+    if exported_message.get("author") != "status":
+        return exported_message
+
+    content = exported_message.get("content")
+    if not isinstance(content, dict):
+        return exported_message
+
+    exported_message["content"] = content.get("infos") or content.get("error") or ""
+    return exported_message
+
+
+def export_task_log(task_record: TaskRecord, criteria: list[str], folder_path: str) -> None:
+    """Write the detailed JSON log for a single completed task."""
+    per_task_path = os.path.join(folder_path, "logs")
+    os.makedirs(per_task_path, exist_ok=True)
+
+    task_metrics = compute_task_metrics(task_record, criteria)
+    with open(os.path.join(per_task_path, f"{task_record.task_id}.json"), "w+") as file:
+        json.dump(_build_task_log(task_record, task_metrics), file, indent=2)
 
 
 def metrics_to_payload(metrics: ScenarioMetrics, extra_counts: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -69,24 +97,17 @@ def metrics_to_payload(metrics: ScenarioMetrics, extra_counts: Optional[Dict[str
     }
 
 
-def export_scenario_try(scenario_result: ScenarioResult, folder_path: str, detailled_log: bool) -> None:
+def export_scenario_try_score(scenario_result: ScenarioResult, folder_path: str) -> None:
     if scenario_result.metrics is None:
         raise RuntimeError("Scenario metrics must be computed before export.")
 
-    if detailled_log:
-        # Detailed logs stay task-oriented so it is easy to inspect one rollout
-        # after a benchmark run and understand where the prefix broke.
-        per_task_path = os.path.join(folder_path, "logs")
-        os.makedirs(per_task_path, exist_ok=True)
-
-        for task_record in scenario_result.iter_task_records():
-            task_metrics = scenario_result.metrics.task_metrics[task_record.task_id]
-            with open(os.path.join(per_task_path, f"{task_record.task_id}.json"), "w+") as file:
-                json.dump(_build_task_log(task_record, task_metrics), file, indent=2)
+    payload = metrics_to_payload(scenario_result.metrics)
+    if scenario_result.randomization_info is not None:
+        payload["randomization"] = scenario_result.randomization_info
 
     try_score_path = os.path.join(folder_path, "try_score.json")
     with open(try_score_path, "w+") as file:
-        json.dump(metrics_to_payload(scenario_result.metrics), file, indent=2)
+        json.dump(payload, file, indent=2)
 
 
 def export_scenario_summary(metrics: ScenarioMetrics, output_path: str, num_try: int) -> None:

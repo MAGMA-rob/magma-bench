@@ -46,7 +46,8 @@ class QwenMagma(LocalSystem):
                 mem_str += f"- {mem}\n"
         else:
             mem_str += "empty\n"
-        prompt_user = f"\nTask Attributes : {task_attributes}.\n{mem_str}\nQuery : {query.get('content','')}"
+        query_content = self.stringify_content(query.get("content", ""))
+        prompt_user = f"\nTask Attributes : {task_attributes}.\n{mem_str}\nQuery : {query_content}"
 
         mess = [{'role': 'system', 'content': self.system_prompt}]
 

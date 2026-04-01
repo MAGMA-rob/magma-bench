@@ -9,7 +9,6 @@ import threading, queue
 class ResultManager():
     """This class handle the export and save of the multiple log, result for the benchmark"""
 
-    _task_log : bool
     _output_path : str
 
     _computed_bench_results : Dict[str, List[ScenarioResult]]
@@ -21,8 +20,6 @@ class ResultManager():
             per_task_log : bool = True,
             unique_try : bool = False,
     ) -> None:
-        
-        self._task_log = per_task_log
         self._output_path = output_path
         self._computed_bench_results = {}
         self._waiting_bench_results = queue.Queue()
@@ -43,20 +40,24 @@ class ResultManager():
                 self._computed_bench_results[scenario_result.scenario_id] = []
             self._computed_bench_results[scenario_result.scenario_id].append(scenario_result)
 
-            self._export(scenario_result, len(self._computed_bench_results[scenario_result.scenario_id]))
+            self._export(scenario_result)
 
 
     def stop(self):
         self._waiting_bench_results.put(None)   # unblocks the queue
         self.thread.join()
             
-    def _export(self, scenario_result : ScenarioResult, num_try : int):
-        """Start the export process"""
-        base_path = os.path.join(self._output_path, scenario_result.scenario_id)
+    def get_try_output_path(self, scenario_id: str, try_number: int) -> str:
+        base_path = os.path.join(self._output_path, scenario_id)
         os.makedirs(base_path, exist_ok=True)
-        out_path = os.path.join(base_path, f"try-{num_try}")
-        os.makedirs(out_path)
-        scenario_result.export(out_path, self._task_log)
+        out_path = os.path.join(base_path, f"try-{try_number}")
+        os.makedirs(out_path, exist_ok=True)
+        return out_path
+
+    def _export(self, scenario_result : ScenarioResult):
+        """Start the export process"""
+        out_path = self.get_try_output_path(scenario_result.scenario_id, scenario_result.try_number)
+        scenario_result.export(out_path)
 
     def push_scenario_result(self, scenario_result : ScenarioResult):            
         self._waiting_bench_results.put(scenario_result)

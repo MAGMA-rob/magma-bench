@@ -3,6 +3,7 @@ from .agents import Agent
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any
 import threading
+import json
 
 class System(ABC):
     """
@@ -31,6 +32,14 @@ class System(ABC):
 
     def init_task(self, inputs : Dict):
         self.tools = inputs.get("tools",[])
+
+    @staticmethod
+    def stringify_content(content: Any) -> str:
+        if isinstance(content, (dict, list)):
+            return json.dumps(content, ensure_ascii=True)
+        if content is None:
+            return ""
+        return str(content)
 
     @abstractmethod
     def compute_answer(self, query : Dict, task_attributes : Dict) -> Dict:
@@ -108,7 +117,7 @@ class LocalSystem(System, ABC):
             [
                 {
                     "author": query['author'],
-                    "sentence": query['content'],
+                    "sentence": self.stringify_content(query['content']),
                     "timestamp": query['timestamp']
                 },
                 {
@@ -198,4 +207,3 @@ class LocalSystem(System, ABC):
         self.memory = []
         self.message_history = []
         return super().reset_step()
-

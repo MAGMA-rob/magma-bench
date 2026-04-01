@@ -1,5 +1,6 @@
 import sys
 import types
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,7 +20,7 @@ benchmark_module.LENGTH_GROUPS = {
 sys.modules["magma_scenarios"] = types.ModuleType("magma_scenarios")
 sys.modules["magma_scenarios.benchmark"] = benchmark_module
 
-from magma_bench.results.records import ScenarioResult, StageResult
+from magma_bench.results import ResultManager, ScenarioResult, StageResult
 from magma_bench.results.metrics import compute_benchmark_metrics
 
 
@@ -46,7 +47,30 @@ def _make_stage_result(success, executions=None):
     result = StageResult()
     result.success = success
     result.executions_result = [True] if executions is None else executions
-    result.conversation = [{"author": "user", "content": "instruction"}]
+    result.conversation = [
+        {"author": "user", "content": "instruction"},
+        {
+            "author": "model",
+            "content": {
+                "say": "I am doing it." if success else "I failed.",
+                "action": {},
+            },
+        },
+        {
+            "author": "status",
+            "content": (
+                {
+                    "infos": "Tool succeeded.",
+                    "previous_tool_call": {"name": "pick", "arguments": {"item": "box"}},
+                }
+                if success
+                else {
+                    "error": "Tool failed.",
+                    "previous_tool_call": {"name": "pick", "arguments": {"item": "box"}},
+                }
+            ),
+        },
+    ]
     result.explanation = "ok" if success else "failed"
     return result
 
@@ -154,3 +178,122 @@ def test_benchmark_metrics_use_raw_counts_not_mean_of_means():
 
     assert benchmark.summary.goal_completion_macro == 75.0
     assert benchmark.summary.goal_completion_micro == 90.0
+
+
+def test_task_log_exports_eagerly_and_final_export_does_not_rewrite_it(tmp_path):
+    manager = ResultManager(str(tmp_path), per_task_log=True)
+    try:
+        scenario_result = ScenarioResult(
+            "scenario_export",
+            ["c-reasoning"],
+            try_number=2,
+            randomization_info={
+                "enabled": True,
+                "variation_index": 1,
+                "attributes": {"objects": ["alpha", "beta"]},
+                "tools": [
+                    {
+                        "name": "press",
+                        "description": "Press one object.",
+                        "parameter_names": ["target"],
+                    }
+                ],
+            },
+        )
+        task = _make_task("task_export", 4, "4-5")
+
+        scenario_result.record_stage(
+            task,
+            _make_stage("s0", 2, keys=["c-reasoning"]),
+            _make_stage_result(True),
+        )
+        scenario_result.record_stage(
+            task,
+            _make_stage("s1", 2),
+            _make_stage_result(False),
+        )
+
+        try_path = Path(
+            manager.get_try_output_path(scenario_result.scenario_id, scenario_result.try_number)
+        )
+        log_path = try_path / "logs" / "task_export.json"
+        try_score_path = try_path / "try_score.json"
+
+        scenario_result.export_task_log(task, str(try_path))
+
+        payload = json.loads(log_path.read_text())
+        assert set(payload.keys()) == {"header", "stage"}
+        assert payload["header"] == {
+            "task_success": False,
+            "goal_completion": 50.0,
+            "secondary_metrics": {
+                "c-reasoning": "1 / 1",
+                "lg-memorization": "0 / 0",
+                "multi-steps": "0 / 0",
+                "recovery": "0 / 0",
+            },
+        }
+        assert payload["stage"] == [
+            {
+                "success": True,
+                "verification_log": "ok",
+                "conversation": [
+                    {"author": "user", "content": "instruction"},
+                    {"author": "model", "content": {"say": "I am doing it.", "action": {}}},
+                    {"author": "status", "content": "Tool succeeded."},
+                ],
+            },
+            {
+                "success": False,
+                "verification_log": "failed",
+                "conversation": [
+                    {"author": "user", "content": "instruction"},
+                    {"author": "model", "content": {"say": "I failed.", "action": {}}},
+                    {"author": "status", "content": "Tool failed."},
+                ],
+            },
+        ]
+        assert not try_score_path.exists()
+
+        log_path.write_text('{"sentinel": true}')
+
+        scenario_result.compute_result()
+        scenario_result.export(str(try_path))
+
+        assert json.loads(log_path.read_text()) == {"sentinel": True}
+        try_score = json.loads(try_score_path.read_text())
+        assert try_score["counts"]["task_count"] == 1
+        assert try_score["counts"]["completed_prefix_horizon"] == 2
+        assert try_score["randomization"] == {
+            "enabled": True,
+            "variation_index": 1,
+            "attributes": {"objects": ["alpha", "beta"]},
+            "tools": [
+                {
+                    "name": "press",
+                    "description": "Press one object.",
+                    "parameter_names": ["target"],
+                }
+            ],
+        }
+    finally:
+        manager.stop()
+
+
+def test_result_manager_exports_scenario_score_to_try_number_without_logs(tmp_path):
+    manager = ResultManager(str(tmp_path), per_task_log=False)
+    scenario_result = ScenarioResult("scenario_manager", ["c-reasoning"], try_number=3)
+    task = _make_task("task_manager", 2, "2-3")
+
+    scenario_result.record_stage(
+        task,
+        _make_stage("s0", 2, keys=["c-reasoning"]),
+        _make_stage_result(True),
+    )
+
+    manager.push_scenario_result(scenario_result)
+    manager.stop()
+
+    try_path = tmp_path / "scenario_manager" / "try-3"
+    assert (try_path / "try_score.json").exists()
+    assert not (try_path / "logs").exists()

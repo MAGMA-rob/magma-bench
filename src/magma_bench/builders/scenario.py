@@ -131,7 +131,7 @@ class Scenario():
             if not out_dict['verdict']: success = False
             reason += out_dict["explanation"]
 
-        return success, reason
+        return success, reason.strip()
     
 
     ############ Getter

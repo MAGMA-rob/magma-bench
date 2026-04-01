@@ -4,6 +4,15 @@ from abc import ABC, abstractmethod
 import time, requests, json, re
 from .base_agent import Agent
 
+
+def _stringify_message_content(content) -> str:
+    if isinstance(content, (dict, list)):
+        return json.dumps(content, ensure_ascii=True)
+    if content is None:
+        return ""
+    return str(content)
+
+
 class OllamaAgent(Agent, ABC):
     """This class allows to use an agent on Ollama to interact with the benchmark"""
 
@@ -99,7 +108,7 @@ class GPTOllamaAgent(OllamaAgent):
     
     def _format_for_history(self, query : Dict, model_answer: Dict) -> List:
         return [
-            {"role":query.get("author"), "content":query.get('content')},
+            {"role":query.get("author"), "content":_stringify_message_content(query.get('content'))},
             {"role":"assistant","content":str(model_answer['say']) + "\n" + str(model_answer['action']),"reasoning":model_answer['reasoning']}
         ]
     
@@ -151,7 +160,7 @@ class ManagedGPTOllamaAgent(OllamaAgent):
     
     def _format_for_history(self, query : Dict, model_answer: Dict) -> List:
         return [
-            {"role":query.get("author"), "content":query.get('content')},
+            {"role":query.get("author"), "content":_stringify_message_content(query.get('content'))},
             {"role":"assistant","content":str(model_answer['say']) + "\n" + str(model_answer['action']),"reasoning":model_answer['reasoning']}
         ]
     
@@ -193,7 +202,7 @@ class QwenOllamaAgent(OllamaAgent):
     
     def _format_for_history(self, query: Dict, model_answer: Dict) -> List:
         return [
-            {"role":query.get("author"), "content":query.get('content')},
+            {"role":query.get("author"), "content":_stringify_message_content(query.get('content'))},
             {"role":"assistant","content":str(model_answer['say'])}
         ]
 

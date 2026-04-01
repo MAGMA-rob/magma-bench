@@ -74,7 +74,13 @@ class TaskRecord:
 class ScenarioResult:
     """Recorded outcome of one full scenario try before aggregation."""
 
-    def __init__(self, scenario_id: str, criteria_to_evaluate: Optional[List[str]] = None) -> None:
+    def __init__(
+        self,
+        scenario_id: str,
+        criteria_to_evaluate: Optional[List[str]] = None,
+        try_number: int = 1,
+        randomization_info: Optional[Dict[str, Any]] = None,
+    ) -> None:
         effective_criteria: List[str] = []
         for criterion in (criteria_to_evaluate or []) + KNOWN_CRITERIA:
             if criterion in KNOWN_CRITERIA and criterion not in effective_criteria:
@@ -82,6 +88,8 @@ class ScenarioResult:
 
         self.scenario_id = scenario_id
         self.criteria_to_evaluate = effective_criteria
+        self.try_number = try_number
+        self.randomization_info = randomization_info
         self._task_records: Dict[str, TaskRecord] = {}
         self.metrics = None
 
@@ -93,6 +101,11 @@ class ScenarioResult:
                 task_horizon=task_ref.task_horizon,
                 length_bucket=task_ref.length_bucket,
             )
+        return self._task_records[task_ref.id]
+
+    def _require_task_record(self, task_ref: Any) -> TaskRecord:
+        if task_ref.id not in self._task_records:
+            raise KeyError(f"No task record registered for task '{task_ref.id}'.")
         return self._task_records[task_ref.id]
 
     def record_stage(self, task_ref: Any, stage_ref: Any, stage_result: StageResult) -> None:
@@ -108,14 +121,21 @@ class ScenarioResult:
         self.metrics = compute_scenario_metrics(self)
         return self.metrics
 
-    def export(self, folder_path: str, detailled_log: bool) -> None:
+    def export_task_log(self, task_ref: Any, folder_path: str) -> None:
+        export_task_log(
+            self._require_task_record(task_ref),
+            self.criteria_to_evaluate,
+            folder_path,
+        )
+
+    def export(self, folder_path: str) -> None:
         if self.metrics is None:
             self.compute_result()
 
-        export_scenario_try(self, folder_path, detailled_log)
+        export_scenario_try_score(self, folder_path)
 
 
 # Late imports keep the public methods above straightforward while still
 # avoiding import cycles between the recording, aggregation and export layers.
-from .export import export_scenario_try
+from .export import export_scenario_try_score, export_task_log
 from .metrics import compute_scenario_metrics

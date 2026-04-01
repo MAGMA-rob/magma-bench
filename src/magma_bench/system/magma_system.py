@@ -48,7 +48,7 @@ class MagmaDual(LocalSystem):
         
         with self.memory_update_lock:
             payload = {
-                "instruction": query.get("content", ""),
+                "instruction": self.stringify_content(query.get("content", "")),
                 "attributes": task_attributes,
                 "memory": self.memory,
                 "function": self.tools,
