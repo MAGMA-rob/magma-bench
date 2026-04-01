@@ -113,7 +113,7 @@ class Scenario():
         if not stage.should_act() and model_response['action'] != {}:
             return False, "The model try to call a tool whereas it should just acknowledge."
 
-        predicates, complementary_verif = stage.get_evaluation_elements()
+        predicates, complementary_verif = stage.get_evaluation_elements(obs)
 
         success = True
         reason = ""

@@ -1,8 +1,9 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from magma_core.base.data_structures import ActiveStageErrorState
+from magma_core.base.goals import BaseGoal
 from magma_scenarios.benchmark import KNOWN_CRITERIA
-
+from ..evalutations.predicate import compile_predicates_to_goals, get_obs_entity_signature
 from .stage_injection import StageInjection
 
 
@@ -30,8 +31,11 @@ class Stage:
     failure_flag: bool
     recovery_flag: bool
     injections: List[StageInjection]
+    predicates : List[BaseGoal]
+    _predicate_specs: List[Dict]
+    _predicate_signature: Optional[Tuple[str, ...]]
+
     _should_reset_env: bool
-    _predicates: List[Dict]
     _comp_eval: Dict
 
     def __new__(cls, inputs: Dict, id: str):
@@ -57,7 +61,9 @@ class Stage:
         self.default_instruction = None
         self.max_agents_step = 1
         self.stage_horizon = 0
-        self._predicates = []
+        self.predicates = []
+        self._predicate_specs = []
+        self._predicate_signature = None
         self._comp_eval = {}
         self.answer_user = False
         self.failure_flag = False
@@ -210,14 +216,14 @@ class Stage:
         force_injections = recovery_injections + failure_injections
         if force_injections and (
             self.expected_behavior != "act"
-            or (self._predicates == [] and self._comp_eval.get("logs", []) == [])
+            or (not self._has_action_goals() and self._comp_eval.get("logs", []) == [])
         ):
             raise TypeError(
                 "A stage can not define force_recovery/force_failure injections while "
                 "not expecting an action or while missing predicates/log verifications."
             )
 
-        if failure_injections and self._predicates == [] and self._comp_eval.get("logs", []) == []:
+        if failure_injections and not self._has_action_goals() and self._comp_eval.get("logs", []) == []:
             raise TypeError(
                 "A stage marked as force_failure must define either an action_goal or a log eval."
             )
@@ -229,9 +235,21 @@ class Stage:
         if self.has_flag_recovery() or self.has_flag_failure():
             self.stage_horizon += 1
 
-    def get_evaluation_elements(self):
+    def _has_action_goals(self) -> bool:
+        return len(self.predicates) > 0 or len(self._predicate_specs) > 0
+
+    def _resolve_predicates(self, obs: Dict) -> List[BaseGoal]:
+        signature = get_obs_entity_signature(obs)
+        if self._predicate_signature != signature:
+            self.predicates = compile_predicates_to_goals(self._predicate_specs, obs)
+            self._predicate_signature = signature
+        return self.predicates
+
+    def get_evaluation_elements(self, obs: Optional[Dict] = None) -> Tuple[List[BaseGoal], Dict]:
         """Allows to gets the evaluation elements (logs, judge, predicates) the inner steps"""
-        return self._predicates, self._comp_eval
+        if obs is not None and len(self._predicate_specs) > 0:
+            self._resolve_predicates(obs)
+        return self.predicates, self._comp_eval
 
     def should_reset_env(self) -> bool:
         """Return True if the env should be reset"""
@@ -333,11 +351,19 @@ class AnswerStage(Stage):
         self._update_stage_horizon()
 
 class ActStage(Stage):
+    def _parse_predicate_specs(self, predicates: List[Dict]) -> List[Dict]:
+        if not isinstance(predicates, list):
+            raise TypeError(f"action_goal must be a list. Got {type(predicates)}.")
+        for i, predicate in enumerate(predicates):
+            if not isinstance(predicate, dict):
+                raise TypeError(f"action_goal[{i}] must be a dict. Got {type(predicate)}.")
+        return predicates
+
     def __init__(self, inputs: Dict, id: str) -> None:
         self._setup_base(id, "act")
         self._init_act_instruction(inputs)
         self.max_agents_step = self._get_positive_max_step(inputs)
-        self._predicates = inputs.get("action_goal", [])
+        self._predicate_specs = self._parse_predicate_specs(inputs.get("action_goal", []))
         self._comp_eval = inputs.get("complementary_verif", {})
         self.answer_user = inputs.get("answer_to_user", False) or inputs.get("flag_answer_to_user", False)
         self.injections = self._parse_injections(inputs)
