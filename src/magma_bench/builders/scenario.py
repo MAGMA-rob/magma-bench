@@ -103,7 +103,7 @@ class Scenario():
 
     ############ EVAL
 
-    def evaluate_stage(self, stage : Stage, model_response : Dict) -> Tuple[bool, str]:
+    def evaluate_stage(self, stage : Stage, model_response : Dict, obs : Dict) -> Tuple[bool, str]:
         """
         Allows to return for a specific Step if the step is marked as successfull or not
         return a tuple bool, str -> boolean success and reason
@@ -114,13 +114,12 @@ class Scenario():
             return False, "The model try to call a tool whereas it should just acknowledge."
 
         predicates, complementary_verif = stage.get_evaluation_elements()
-        env_state = self.env.unwrapped.get_state_dict()['actors']
 
         success = True
         reason = ""
 
         if predicates:
-            if not evaluate_env_success(env_state, predicates): 
+            if not evaluate_env_success(obs, predicates): 
                 success = False
                 reason+="Predicate fails. "
 
@@ -165,13 +164,16 @@ class Scenario():
         self.tool_executor.compute_actions(tool_calls, error_state)
         return True
     
-    def execute_env_step(self) -> Dict:
-        """Execute one env step. Return a dict with status when tool is finish"""
+    def execute_env_step(self) -> Tuple[Dict,Dict]:
+        """Execute one env step. Return a tuple with:
+        - dict with status when tool is finish
+        - observation dict 
+        """
         if not self.env: raise ValueError("Env not initialized")
         action = self.tool_executor.step()
         obs, _, _, _, _ = self.env.step(action)
 
-        return self.tool_executor.verif_ended_tool(obs)
+        return self.tool_executor.verif_ended_tool(obs), obs
     
     def env_reset(self):
         if self.env: self.env.reset(seed=self.seed,options=self.tool_executor.get_env_options(0))

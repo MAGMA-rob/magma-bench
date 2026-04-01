@@ -164,7 +164,7 @@ class BenchmarkRunner():
                     stageResult.executions_result.append(True)
 
             # execute an env step
-            tools_ended = scenario.execute_env_step()
+            tools_ended, obs = scenario.execute_env_step()
             
             # if all tools call are finished, manage planner error, env updating and go to next step
             if tools_ended:
@@ -203,7 +203,7 @@ class BenchmarkRunner():
                     stageResult.explanation = 'Launched a tool on a text-only stage'
                 else:
                     try:
-                        stageResult.success, stageResult.explanation = scenario.evaluate_stage(stage, response_dict)
+                        stageResult.success, stageResult.explanation = scenario.evaluate_stage(stage, response_dict, obs)
                     except:
                         stageResult.success, stageResult.explanation = False, "Exception due to no tool call"
 
@@ -277,11 +277,11 @@ class BenchmarkRunner():
     #             })
 
     
-    def _run_scenario(self, scenario : Scenario, task_decomp : Dict[str,List[str]]):
+    def _run_scenario(self, scenario : Scenario):
         nb_tasks = scenario.nb_tasks
 
         for try_index in tqdm(range(self.num_try), desc="Evaluation Tries", position=1, leave=False):
-            scenario_result = ScenarioResult(scenario.id, scenario.evaluated_criteria, task_decomp)
+            scenario_result = ScenarioResult(scenario.id, scenario.evaluated_criteria)
             # Here we change the runtimeRandomizer
             self.tool_executor.set_randomizer_index(try_index)
             init_elements = scenario.get_init_elements()
@@ -304,6 +304,7 @@ class BenchmarkRunner():
                     if instruction is None:
                         # No explicit instruction, no fallback and no reusable status: 
                         # skip this chained stage and move on until we reach a runnable one.
+                        scenario_result.record_skip(task, stage, "unresolved_instruction")
                         previous_stage_success = False
                         previous_status_instruction = None
                         continue
@@ -313,16 +314,7 @@ class BenchmarkRunner():
                     stage_result = self._run_stage(scenario,stage,task_attributes,instruction)
 
                     # saves results and stage info
-                    #self.add_stage_info(stage.id, instruction, task_attributes)
-                    scenario_result.add_result(
-                        task,
-                        stage_result.conversation,
-                        stage_result.success,
-                        stage.has_flag_failure() or stage.has_flag_recovery(),
-                        stage_result.executions_result,
-                        stage_result.explanation,
-                        stage.keys_evaluator
-                    )
+                    scenario_result.record_stage(task, stage, stage_result)
 
                     previous_stage_success = stage_result.success
                     previous_status_instruction = self._get_last_status_instruction(stage_result.conversation)
@@ -343,7 +335,7 @@ class BenchmarkRunner():
         
         for bench_config in tqdm(self._benchmark_configs, desc="Scenarios", position=0, leave=True):
             scenario = ScenarioBuilder.load(bench_config, self.output_path, self.tool_executor, args)
-            self._run_scenario(scenario, bench_config.task_decomp)
+            self._run_scenario(scenario)
             scenario.close()
 
         self.result_manager.stop()

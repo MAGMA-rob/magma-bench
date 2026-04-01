@@ -11,7 +11,54 @@ SRC_ROOT = ROOT / "magma-bench-dev" / "src"
 sys.path.insert(0, str(SRC_ROOT))
 
 benchmark_module = types.ModuleType("magma_scenarios.benchmark")
-benchmark_module.KNOWN_CRITERIA = ["multi-steps", "c-reasoning", "lg-memorization"]
+benchmark_module.KNOWN_CRITERIA = ["multi-steps", "c-reasoning", "lg-memorization", "recovery"]
+
+
+def _count_task_horizon(stage_list):
+    total = 0
+    for stage in stage_list:
+        expected_behavior = stage.get("expected_behavior", "act")
+        max_step = stage.get("max_step", 1 if expected_behavior in {"acknowledge", "answer"} else None)
+        total += max_step
+        if stage.get("answer_to_user") or stage.get("flag_answer_to_user"):
+            total += 1
+        raw_injections = stage.get("injection", stage.get("injections"))
+        if raw_injections is None:
+            continue
+        if isinstance(raw_injections, dict):
+            raw_injections = [raw_injections]
+        if any(injection.get("mode") in {"force_recovery", "force_failure"} for injection in raw_injections):
+            total += 1
+    return total
+
+
+def _get_length_bucket(task_horizon):
+    if 2 <= task_horizon <= 3:
+        return "2-3"
+    if 4 <= task_horizon <= 5:
+        return "4-5"
+    if 6 <= task_horizon <= 9:
+        return "6-9"
+    if 10 <= task_horizon <= 16:
+        return "10-16"
+    return "other"
+
+
+def _task_has_recovery_criterion(stage_list):
+    for stage in stage_list:
+        raw_injections = stage.get("injection", stage.get("injections"))
+        if raw_injections is None:
+            continue
+        if isinstance(raw_injections, dict):
+            raw_injections = [raw_injections]
+        if any(injection.get("mode") in {"force_recovery", "force_failure"} for injection in raw_injections):
+            return True
+    return False
+
+
+benchmark_module.count_task_horizon = _count_task_horizon
+benchmark_module.get_length_bucket = _get_length_bucket
+benchmark_module.task_has_recovery_criterion = _task_has_recovery_criterion
 sys.modules["magma_scenarios"] = types.ModuleType("magma_scenarios")
 sys.modules["magma_scenarios.benchmark"] = benchmark_module
 

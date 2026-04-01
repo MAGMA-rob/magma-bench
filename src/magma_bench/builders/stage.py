@@ -23,6 +23,7 @@ class Stage:
     instruction: Optional[Dict]
     default_instruction: Optional[Dict]
     max_agents_step: int
+    stage_horizon: int
     expected_behavior: str
     keys_evaluator: List[str]
     answer_user: bool
@@ -55,6 +56,7 @@ class Stage:
         self.instruction = None
         self.default_instruction = None
         self.max_agents_step = 1
+        self.stage_horizon = 0
         self._predicates = []
         self._comp_eval = {}
         self.answer_user = False
@@ -220,6 +222,13 @@ class Stage:
                 "A stage marked as force_failure must define either an action_goal or a log eval."
             )
 
+    def _update_stage_horizon(self):
+        self.stage_horizon = self.max_agents_step
+        if self.answer_user:
+            self.stage_horizon += 1
+        if self.has_flag_recovery() or self.has_flag_failure():
+            self.stage_horizon += 1
+
     def get_evaluation_elements(self):
         """Allows to gets the evaluation elements (logs, judge, predicates) the inner steps"""
         return self._predicates, self._comp_eval
@@ -290,6 +299,7 @@ class AcknowledgeStage(Stage):
             "acknowledge",
         )
         self.instruction = self._build_explicit_instruction(inputs)
+        self._update_stage_horizon()
 
 
 class AnswerStage(Stage):
@@ -320,6 +330,7 @@ class AnswerStage(Stage):
             )
         self._should_reset_env = self._extract_should_reset_env(inputs)
         self.keys_evaluator = self._parse_keys_evaluator(inputs.get("keys_evaluator", []))
+        self._update_stage_horizon()
 
 class ActStage(Stage):
     def __init__(self, inputs: Dict, id: str) -> None:
@@ -333,3 +344,4 @@ class ActStage(Stage):
         self._validate_injections()
         self._should_reset_env = self._extract_should_reset_env(inputs)
         self.keys_evaluator = self._parse_keys_evaluator(inputs.get("keys_evaluator", []))
+        self._update_stage_horizon()

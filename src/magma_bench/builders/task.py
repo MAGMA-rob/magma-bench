@@ -1,5 +1,7 @@
 from typing import Dict, List
 
+from magma_scenarios.benchmark import count_task_horizon, get_length_bucket, task_has_recovery_criterion
+
 from .stage import Stage
 
 
@@ -9,11 +11,17 @@ class Task:
     stages: List[Stage]
     id: str
     criteria: List[str]
+    task_horizon: int
+    length_bucket: str
 
     def __init__(self, task_data: Dict):
         self.stages = []
         self.id = task_data["id"]
-        self.criteria = task_data["criteria"]
+        self.criteria = list(dict.fromkeys(task_data["criteria"]))
+        if task_has_recovery_criterion(task_data["stages"]) and "recovery" not in self.criteria:
+            self.criteria.append("recovery")
+        self.task_horizon = count_task_horizon(task_data["stages"])
+        self.length_bucket = get_length_bucket(self.task_horizon)
 
         for i, stage in enumerate(task_data["stages"]):
             try:

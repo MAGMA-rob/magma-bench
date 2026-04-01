@@ -13,7 +13,11 @@ from magma_core.base.executor import ToolsBaseExecutor
 from magma_core.base.data_structures import ToolInfos, Log, ActiveStageErrorState
 from magma_core.workers import LMWorker
 from magma_core.protocol.payload.user_sim_payload import JudgePayload
-from magma_core.utils.global_utils import extract_env_state_val, batch_set_value
+from magma_core.utils.global_utils import (
+    batch_set_value,
+    extract_env_state_val,
+    merge_robot_articulations,
+)
 
 @dataclass
 class SavedEnvState:
@@ -100,15 +104,25 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
         """
         full_state_dict = self.env.get_state_dict().copy()
         calls = {}
+        robot_names = self.trajectory_converter.agents_name
         for ids in desired_env_ids:
             if ids >= self.nb_env:
                 raise RuntimeError(f"Asking reset for an unknow ids = {ids}. Max nb of env {self.nb_env}")
             st = self._precedent_env_state[ids].env_state.copy()
+            source_state = extract_env_state_val(full_state_dict, ids)
             if not reset_joint_to_env_default:
-                st['articulations'] = extract_env_state_val(full_state_dict, ids)['articulations']
+                source_articulations = source_state.get('articulations', None)
             else:
-                st['articulations'] = self.task_ref._default_env_state['articulations']
-            batch_set_value(full_state_dict, ids, st)
+                source_articulations = self.task_ref._default_env_state.get('articulations', None)
+
+            if source_articulations is not None:
+                st['articulations'], _ = merge_robot_articulations(
+                    st.get('articulations', {}),
+                    source_articulations,
+                    robot_names,
+                )
+
+            batch_set_value(full_state_dict, torch.tensor([ids]), st, strict=False)
             calls[ids] = self._precedent_env_state[ids].tool_call.copy()
         self.env.set_state_dict(full_state_dict)
         action = self.step()

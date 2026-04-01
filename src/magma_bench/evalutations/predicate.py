@@ -82,11 +82,11 @@ def eval_predicate(env_state_dict : Dict, predicate : Dict):
 
     return func(env_state_dict, *args)
 
-def evaluate_env_success(env_state_dict, output_predicates : List[Dict]) -> bool: #and
+def evaluate_env_success(obs, output_predicates : List[Dict]) -> bool: #and
     out = True
     for predicate in output_predicates:
         try:
-            out = eval_predicate(env_state_dict, predicate)
+            out = eval_predicate(obs, predicate)
         except Exception as e:
             print(f"[BENCHMARK] Fail to compute predicate {predicate.get('predicate','UNKNOWN')} due to {e}. Considering it as True.")
             continue
