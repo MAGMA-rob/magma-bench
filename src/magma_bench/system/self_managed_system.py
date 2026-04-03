@@ -36,8 +36,8 @@ class SelfManagedAgentSystem(LocalSystem):
         self.system_prompt = BASE_SYSTEM_PROMPT + json.dumps(tools) + "\n"
 
     def compute_answer(self, query: Dict, task_attributes: Dict) -> Dict:
-
-        prompt_user = f"\nMemory:\n{self._get_memory()}\nTask Attributes : {task_attributes}.\nQuery : {query.get('content','')}"
+        query_content = self.stringify_content(query.get("content", ""))
+        prompt_user = f"\nMemory:\n{self._get_memory()}\nTask Attributes : {task_attributes}.\nQuery : {query_content}"
 
         mess = [{'role': 'system', 'content': self.system_prompt}]
 

@@ -1,13 +1,11 @@
 from .scenario import ScenarioConfig
 import magma_scenarios.benchmark as bench_pkg
 from magma_core.utils.data_utils import verify_key
-from magma_scenarios.benchmark import KNOWN_CRITERIA
+from magma_scenarios.benchmark import KNOWN_CRITERIA, LENGTH_GROUPS
 
 import json, os
 import importlib.resources
 from typing import List, Optional, Any, Dict, Tuple, Union
-
-GROUP = {"CGC 2-3":[2,3],"CGC 4-5":[4,5],"CGC 6-9":[6,9],"CGC 10-16":[10,16]}
 
 class BenchmarkLoader():
     """
@@ -33,7 +31,7 @@ class BenchmarkLoader():
             bench_config = json.load(file)
         for scenario_dict in bench_config:
             if BenchmarkLoader._scenario_valid(scenario,criteria,scenario_dict):
-                task_decomp = {k:[] for k in GROUP}
+                task_decomp = {k:[] for k in LENGTH_GROUPS}
 
                 print(f"[LOADER] Loading {scenario_dict['scenario_name']} for criteria {criteria}")
                 
@@ -60,7 +58,7 @@ class BenchmarkLoader():
                                 tasks.append(task_folder / name)
 
                 for horizon, tasks_list in s_tasks_horizon.items():
-                    for k, bound in GROUP.items():
+                    for k, bound in LENGTH_GROUPS.items():
                         if int(horizon) >= bound[0] and int(horizon) <= bound[1]:
                             task_decomp[k].extend(tasks_list)
                             break

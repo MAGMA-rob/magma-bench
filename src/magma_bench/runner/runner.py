@@ -18,12 +18,12 @@ from magma_core.workers import LMWorker
 
 from typing import Dict, List, Type, Union
 from tqdm import tqdm
-import os, json
+import os, json, copy
 from datetime import datetime
 
 class BenchmarkRunner():
     """
-    Main class of the benchmark. ALlows to initialize and runs evaluation on multiple benchmark for a given system
+    Main class of the benchmark. Allows to initialize and runs evaluation on multiple benchmark for a given system
     """
 
     # reference to the system to evaluate
@@ -53,6 +53,8 @@ class BenchmarkRunner():
         self.benchmarks = []
         self.output_path = os.path.join(magma_config.benchmark["save_dir"],self.system.system_name, datetime.now().strftime("%m-%d_%H-%M"))
 
+        self.per_task_log = magma_config.benchmark["logs"]
+        print(self.per_task_log)
         self.result_manager = ResultManager(self.output_path, magma_config.benchmark["logs"], magma_config.benchmark["num_eval"]==1)
         worker = LMWorker(magma_config.backends[magma_config.benchmark["backend_verifier"]])
 
@@ -63,8 +65,6 @@ class BenchmarkRunner():
             worker, nb_env=1, 
             randomize_variation=self.num_try
         )
-
-        
     
     def load_benchmark(self, criteria, scenario) -> bool:
         """Load one benchmark to evaluate the system on"""
@@ -76,8 +76,6 @@ class BenchmarkRunner():
 
         return True
     
-
-    
     @dataclass
     class StageCounters:
         is_running_a_tool = False
@@ -88,9 +86,41 @@ class BenchmarkRunner():
 
     def _make_answer(self, author: str, content: Dict, timestep = 0):
         """Return a json formated answer."""
-        return {'author':author, "content": str(content), "timestamp":timestep}
+        return {'author':author, "content": copy.deepcopy(content), "timestamp":timestep}
 
+    def _get_last_status_instruction(self, conversation: List[Dict]) -> Union[Dict, None]:
+        """
+        Return the latest status message produced during a stage execution.
+        """
+        for message in reversed(conversation):
+            if message.get("author") == "status":
+                return message
+        return None
 
+    def _resolve_stage_instruction(
+            self,
+            stage: Stage,
+            previous_stage_success: bool,
+            previous_status_instruction: Union[Dict, None],
+        ) -> Union[Dict, None]:
+        """
+        Resolve which instruction should start the current benchmark stage.
+
+        If the stage has no explicit instruction, we reuse the previous status
+        when the previous stage succeeded. If no reusable status exists, we
+        fall back to ``default_instruction`` when provided. Otherwise the stage
+        is skipped so the runner can continue until it finds a runnable stage.
+        """
+        if stage.instruction is not None:
+            return stage.instruction
+
+        if previous_stage_success and previous_status_instruction is not None:
+            return previous_status_instruction
+
+        if stage.default_instruction is not None:
+            return stage.default_instruction
+
+        return None
 
     def _run_stage(self, scenario : Scenario, stage : Stage, task_attributes : Dict, instruction : Dict) -> StageResult:
         """Run the evaluation process for one inner-step"""
@@ -98,6 +128,7 @@ class BenchmarkRunner():
         call_action = {} # functions calling stack
         status_dict = {}
         response_dict = {} # action + think + say stack
+        error_state = stage.get_error_state()
 
         # returned values
         stageResult = StageResult()
@@ -123,7 +154,7 @@ class BenchmarkRunner():
                 call_action : Dict = response_dict.get("action",{})
                 if call_action:
                     if stage.should_act():
-                        scenario.send_action(call_action) 
+                        scenario.send_action(call_action, error_state) 
                         stageCounters.is_running_a_tool = True
                     else:
                         stageCounters.end_of_action = True
@@ -135,7 +166,7 @@ class BenchmarkRunner():
                     stageResult.executions_result.append(True)
 
             # execute an env step
-            tools_ended = scenario.execute_env_step()
+            tools_ended, obs = scenario.execute_env_step()
             
             # if all tools call are finished, manage planner error, env updating and go to next step
             if tools_ended:
@@ -144,7 +175,7 @@ class BenchmarkRunner():
                 if any(tools_ended[0]['planning_error']):
                     stageCounters.planner_error_count+=1
                     # We got a planning error here. We retry the same function
-                    self.tool_executor.ask_for_retry([0], stageCounters.planner_error_count % 3 == 0)
+                    self.tool_executor.ask_for_retry([0], stageCounters.planner_error_count % 3 == 0, error_state)
                     if stageCounters.planner_error_count > 10:
                         stageResult.executions_result.append(True)
                         stageResult.success = False
@@ -169,12 +200,16 @@ class BenchmarkRunner():
             # manage env status and returned messages on stage end
             if stageCounters.end_of_action:
                 # Verify if the stage is still valid
+                stageCounters.is_running_a_tool = False
+                stageCounters.end_of_action = False
+
                 if stageCounters.catastrophic:
                     stageResult.success = False
                     stageResult.explanation = 'Launched a tool on a text-only stage'
+                    stageCounters.catastrophic = False
                 else:
                     try:
-                        stageResult.success, stageResult.explanation = scenario.evaluate_stage(stage, response_dict)
+                        stageResult.success, stageResult.explanation = scenario.evaluate_stage(stage, response_dict, obs)
                     except:
                         stageResult.success, stageResult.explanation = False, "Exception due to no tool call"
 
@@ -188,8 +223,9 @@ class BenchmarkRunner():
                             # If the stage is successfull + marked as recovery but we haven't done it yet.
                             status_dict = build_fake_execution_fail(
                                 call_action, status_dict,
-                                stage.force_recovery if stage.has_flag_recovery() else stage.force_failure)
-                            self.tool_executor.ask_for_retry([0],False,auto_compute=False)
+                                stage.get_error_flag()
+                            )
+                            self.tool_executor.ask_for_retry([0],False,auto_compute=False, error_state=error_state)
                             stageCounters.step_counter-=1
                             stageResult.success = False
                             if not should_recover: #only in force_failure, count the number of model errors before informing about the failure case
@@ -220,8 +256,6 @@ class BenchmarkRunner():
 
                 # check user response in case of stage sucess                
                 if stageResult.success:
-                    stageCounters.is_running_a_tool = False
-                    stageCounters.end_of_action = False
                     # check if user got a valid answer
                     if stage.has_flag_answer_to_user():
                         # get model answer
@@ -247,13 +281,24 @@ class BenchmarkRunner():
     #             })
 
     
-    def _run_scenario(self, scenario : Scenario, task_decomp : Dict[str,List[str]]):
+    def _run_scenario(self, scenario : Scenario):
         nb_tasks = scenario.nb_tasks
 
         for try_index in tqdm(range(self.num_try), desc="Evaluation Tries", position=1, leave=False):
-            scenario_result = ScenarioResult(scenario.id, scenario.evaluated_criteria, task_decomp)
-            # Here we change the runtimeRandomizer
+            try_number = try_index + 1
+            try_output_path = None
+            if self.per_task_log:
+                try_output_path = self.result_manager.get_try_output_path(scenario.id, try_number)
+
+            # Select the indexed benchmark variation before collecting any
+            # try-level metadata or exposing tools/attributes to the system.
             self.tool_executor.set_randomizer_index(try_index)
+            scenario_result = ScenarioResult(
+                scenario.id,
+                scenario.evaluated_criteria,
+                try_number=try_number,
+                randomization_info=self.tool_executor.get_try_randomization_info(),
+            )
             init_elements = scenario.get_init_elements()
             self.system.init_task(init_elements)
             
@@ -262,35 +307,40 @@ class BenchmarkRunner():
 
                 task : Task = scenario.get_task(task_id)
                 task_attributes = scenario.get_init_elements()["attributes"]
-                
-                conversation = []
-                success = False
+
+                previous_stage_success = False
+                previous_status_instruction = None
                 for stage in task.stages:
-                    instruction = stage.instruction
+                    instruction = self._resolve_stage_instruction(
+                        stage,
+                        previous_stage_success,
+                        previous_status_instruction,
+                    )
                     if instruction is None:
-                        if success and conversation[-1]["author"] == "status": instruction = conversation[-1]
-                        else: instruction = stage.get_default_instruction()
+                        # No explicit instruction, no fallback and no reusable status: 
+                        # skip this chained stage and move on until we reach a runnable one.
+                        scenario_result.record_skip(task, stage, "unresolved_instruction")
+                        previous_stage_success = False
+                        previous_status_instruction = None
+                        continue
 
                     instruction = json.loads(self.tool_executor.randomizer.traduce_attributes_to_llm(json.dumps(instruction)))
 
                     stage_result = self._run_stage(scenario,stage,task_attributes,instruction)
 
                     # saves results and stage info
-                    #self.add_stage_info(stage.id, instruction, task_attributes)
-                    scenario_result.add_result(
-                        task,
-                        stage_result.conversation,
-                        stage_result.success,
-                        stage.has_flag_failure() or stage.has_flag_recovery(),
-                        stage_result.executions_result,
-                        stage_result.explanation,
-                        stage.keys_evaluator
-                    )
+                    scenario_result.record_stage(task, stage, stage_result)
+
+                    previous_stage_success = stage_result.success
+                    previous_status_instruction = self._get_last_status_instruction(stage_result.conversation)
 
                     if stage.should_reset_env():
                         scenario.env_reset()
                     
                     scenario.save_video(f"{scenario.name}-try-{try_index}-task-{task_id}")
+
+                if self.per_task_log and try_output_path is not None:
+                    scenario_result.export_task_log(task, try_output_path)
 
             self.result_manager.push_scenario_result(scenario_result)
 
@@ -303,7 +353,7 @@ class BenchmarkRunner():
         
         for bench_config in tqdm(self._benchmark_configs, desc="Scenarios", position=0, leave=True):
             scenario = ScenarioBuilder.load(bench_config, self.output_path, self.tool_executor, args)
-            self._run_scenario(scenario, bench_config.task_decomp)
+            self._run_scenario(scenario)
             scenario.close()
 
         self.result_manager.stop()

@@ -1,5 +1,5 @@
 from .scenario import Scenario, ScenarioConfig
-from .details import Task
+from .task import Task
 from magma_bench.executor import ToolsEvalExecutor
 
 import json

@@ -1,96 +1,134 @@
-from typing import List, Dict, Callable, Any
-import torch
+from typing import Callable, Dict, List, Tuple
 from itertools import product
 
+from magma_core.base.goals import And, At, AtLeastCountAt, BaseGoal, NotAt, On, Or
 from magma_core.utils.text_utils import star_extractor
 
-def _in(env_state_dict : Dict, object : str, target : str) -> bool:
-    dist = torch.norm(env_state_dict[object][0][:2] - env_state_dict[target][0][:2])
-    return (dist < 0.1).item()
 
-def _on(env_state_dict, top_object, bot_object) -> bool:
-    dist = torch.norm(env_state_dict[top_object][0][:2] - env_state_dict[bot_object][0][:2])
-    return (dist < 0.05 and env_state_dict[top_object][0][2] > env_state_dict[bot_object][0][2]).item()
+GoalBuilder = Callable[[List[str], List], BaseGoal]
 
-def _on_mutual(env_state_dict, object1, object2) -> bool:
-    dist = torch.norm(env_state_dict[object1][0][:2] - env_state_dict[object2][0][:2])
-    return (dist < 0.05).item()
 
-def _not_in(env_state_dict, object, target) -> bool:
-    return not _in(env_state_dict, object, target)
+def get_obs_entity_names(obs: Dict) -> List[str]:
+    extra = obs.get("extra", None)
+    if not isinstance(extra, dict):
+        raise RuntimeError("Benchmark predicate evaluation requires obs['extra'] to be a dict.")
+    return list(extra.keys())
 
-def _or(env_state_dict, *predicates) -> bool:
-    for predicate in predicates:
-        try:
-            out = eval_predicate(env_state_dict, predicate)
-        except Exception as e:
-            print(f"[BENCHMARK] Fail to compute predicate {predicate.get('predicate','UNKNOWN')} due to {e}. Considering it False")
-            continue
-        if out:
-            return out
-    return False
 
-def lift_predicate(func: Callable) -> Callable:
-    def wrapper(env_state_dict, *args):
-        normalized = [
-            arg if isinstance(arg, list) else [arg]
-            for arg in args
-        ]
+def get_obs_entity_signature(obs: Dict) -> Tuple[str, ...]:
+    return tuple(sorted(get_obs_entity_names(obs)))
 
-        # Cartesian product of all arguments
-        for combo in product(*normalized):
-            if not func(env_state_dict, *combo):
-                return False
-        return True
 
-    return wrapper
+def _expand_entity_arg(entity_names: List[str], value) -> List[str]:
+    if isinstance(value, str):
+        if "*" in value:
+            return star_extractor(entity_names, value)
+        return [value]
+    if isinstance(value, list):
+        out = []
+        for item in value:
+            out.extend(_expand_entity_arg(entity_names, item))
+        return out
+    raise RuntimeError(
+        f"Error in predicate argument, got type {type(value)} which is supposed "
+        "to be either a List[str] or a str"
+    )
 
-predicate_know = {
-    "in" : lift_predicate(_in),
-    "not_in" : lift_predicate(_not_in),
-    "on" : lift_predicate(_on),
-    "on_mutual" : lift_predicate(_on_mutual),
-    "or" : lift_predicate(_or)
-}
 
-###############################
+def _combine_all(goals: List[BaseGoal]) -> BaseGoal:
+    if len(goals) == 0:
+        raise ValueError("Can not combine an empty list of goals.")
+    if len(goals) == 1:
+        return goals[0]
+    return And(goals)
 
-def recursive_extractor(env_actors, args) -> List:
-    out_args = []
-    for arg in args:
-        if isinstance(arg, List):
-            out_args.append(recursive_extractor(env_actors, arg))
-        elif isinstance(arg, str):
-            if '*' in arg:
-                out_args.append(star_extractor(env_actors, arg))
-            else:
-                out_args.append(arg)
-        else:
-            raise RuntimeError(f"Error in predicate argument, got type {type(arg)} which is supposed to be either a List[str] or a str")
-    return out_args
 
-def eval_predicate(env_state_dict : Dict, predicate : Dict):
-    func_name = predicate.get("predicate","")
+def _build_in(entity_names: List[str], args: List) -> BaseGoal:
+    if len(args) != 2:
+        raise ValueError(f"'in' predicate expects 2 args, got {len(args)}")
+    objects = _expand_entity_arg(entity_names, args[0])
+    targets = _expand_entity_arg(entity_names, args[1])
+    return _combine_all([At(obj, target) for obj, target in product(objects, targets)])
+
+
+def _build_not_in(entity_names: List[str], args: List) -> BaseGoal:
+    if len(args) != 2:
+        raise ValueError(f"'not_in' predicate expects 2 args, got {len(args)}")
+    objects = _expand_entity_arg(entity_names, args[0])
+    targets = _expand_entity_arg(entity_names, args[1])
+    return _combine_all([NotAt(obj, [target], strict=False) for obj, target in product(objects, targets)])
+
+
+def _build_on(entity_names: List[str], args: List) -> BaseGoal:
+    if len(args) != 2:
+        raise ValueError(f"'on' predicate expects 2 args, got {len(args)}")
+    top_objects = _expand_entity_arg(entity_names, args[0])
+    bottom_objects = _expand_entity_arg(entity_names, args[1])
+    return _combine_all([On(top, bottom) for top, bottom in product(top_objects, bottom_objects)])
+
+
+def _build_on_mutual(entity_names: List[str], args: List) -> BaseGoal:
+    if len(args) != 2:
+        raise ValueError(f"'on_mutual' predicate expects 2 args, got {len(args)}")
+    objects_1 = _expand_entity_arg(entity_names, args[0])
+    objects_2 = _expand_entity_arg(entity_names, args[1])
+    return _combine_all([At(obj_1, obj_2, thresh=0.05) for obj_1, obj_2 in product(objects_1, objects_2)])
+
+
+def _build_count(entity_names: List[str], args: List) -> BaseGoal:
+    if len(args) != 3:
+        raise ValueError(f"'count' predicate expects 3 args, got {len(args)}")
+    objects = _expand_entity_arg(entity_names, args[0])
+    targets = _expand_entity_arg(entity_names, args[1])
+    minimum = args[2]
+    if not isinstance(minimum, int):
+        raise TypeError(f"'count' minimum must be an int, got {type(minimum)}")
+    return _combine_all([AtLeastCountAt(objects, target, minimum) for target in targets])
+
+
+def compile_predicate_to_goal(predicate: Dict, entity_names: List[str]) -> BaseGoal:
+    func_name = predicate.get("predicate", "")
     args = predicate.get("args", [])
 
-    func = predicate_know.get(func_name, None)
+    if func_name == "or":
+        if not isinstance(args, list) or len(args) == 0:
+            raise ValueError("'or' predicate requires a non-empty list of sub-predicates.")
+        return Or([compile_predicate_to_goal(child_predicate, entity_names) for child_predicate in args])
 
-    if not func:
+    builder = predicate_registry.get(func_name, None)
+    if builder is None:
         raise ValueError(f"unknown predicate : {func_name}")
 
-    args = recursive_extractor(list(env_state_dict.keys()),args)
+    if not isinstance(args, list):
+        raise TypeError(f"Predicate args must be a list. Got {type(args)}")
 
-    return func(env_state_dict, *args)
+    return builder(entity_names, args)
 
-def evaluate_env_success(env_state_dict, output_predicates : List[Dict]) -> bool: #and
-    out = True
-    for predicate in output_predicates:
+
+def compile_predicates_to_goals(predicates: List[Dict], obs: Dict) -> List[BaseGoal]:
+    entity_names = list(get_obs_entity_signature(obs))
+    return [compile_predicate_to_goal(predicate, entity_names) for predicate in predicates]
+
+
+predicate_registry: Dict[str, GoalBuilder] = {
+    "in": _build_in,
+    "not_in": _build_not_in,
+    "on": _build_on,
+    "on_mutual": _build_on_mutual,
+    "count": _build_count,
+}
+
+
+def evaluate_env_success(obs: Dict, goals: List[BaseGoal]) -> bool:
+    for goal in goals:
         try:
-            out = eval_predicate(env_state_dict, predicate)
+            if not (goal.verify(obs) == 1).all().item():
+                return False
         except Exception as e:
-            print(f"[BENCHMARK] Fail to compute predicate {predicate.get('predicate','UNKNOWN')} due to {e}. Considering it as True.")
+            print(
+                f"[BENCHMARK] Fail to compute predicate {goal.name} "
+                f"due to {e}. Considering it as True."
+            )
             continue
 
-        if not out:
-            break
-    return out
+    return True

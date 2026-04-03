@@ -3,9 +3,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from magma_bench.executor import ToolsEvalExecutor
-from .details import Task, Stage
+from .task import Task
+from .stage import Stage
 from magma_bench.evalutations import evaluate_env_success
-
+from magma_core.base.data_structures import ActiveStageErrorState
+from magma_core.base.tasks import BaseBenchmarkTask
 from magma_scenarios import load_preset
 
 @dataclass
@@ -56,6 +58,9 @@ class Scenario():
         Cls_Task = load_preset(task_name)
         task_ref = Cls_Task()
 
+        if not isinstance(task_ref, BaseBenchmarkTask):
+            raise ValueError(f"Benchmark tasks must inherits from a BaseBenchmarkTask class. It's not the case of {task_ref.__class__.__name__}")
+
         self.env = self.tool_executor.initialize(
             task_ref=task_ref,
             video_path=video_output_path,
@@ -66,6 +71,26 @@ class Scenario():
             self.saving_video = True
         else:
             self.saving_video = False
+
+        # Verify that all used errors exist in the BenchmarkTask
+        self._validate_runtime_error_injections(task_ref)
+
+    def _validate_runtime_error_injections(self, task_ref : BaseBenchmarkTask):
+        """
+        Verify that every runtime_error declared in benchmark JSON can be
+        resolved against the benchmark task error registry.
+        """
+        for task in self.tasks:
+            for stage in task.stages:
+                error_state = stage.get_error_state()
+                if not error_state:
+                    continue
+                try:
+                    task_ref.get_active_stage_error(0, error_state)
+                except Exception as exc:
+                    raise ValueError(
+                        f"Task {task.id}, stage {stage.id}: invalid runtime_error injection. {exc}"
+                    ) from exc
 
     def save_video(self, video_name):
         if self.saving_video and self.env is not None:
@@ -78,7 +103,7 @@ class Scenario():
 
     ############ EVAL
 
-    def evaluate_stage(self, stage : Stage, model_response : Dict) -> Tuple[bool, str]:
+    def evaluate_stage(self, stage : Stage, model_response : Dict, obs : Dict) -> Tuple[bool, str]:
         """
         Allows to return for a specific Step if the step is marked as successfull or not
         return a tuple bool, str -> boolean success and reason
@@ -88,14 +113,13 @@ class Scenario():
         if not stage.should_act() and model_response['action'] != {}:
             return False, "The model try to call a tool whereas it should just acknowledge."
 
-        predicates, complementary_verif = stage.get_evaluation_elements()
-        env_state = self.env.unwrapped.get_state_dict()['actors']
+        predicates, complementary_verif = stage.get_evaluation_elements(obs)
 
         success = True
         reason = ""
 
         if predicates:
-            if not evaluate_env_success(env_state, predicates): 
+            if not evaluate_env_success(obs, predicates): 
                 success = False
                 reason+="Predicate fails. "
 
@@ -107,7 +131,7 @@ class Scenario():
             if not out_dict['verdict']: success = False
             reason += out_dict["explanation"]
 
-        return success, reason
+        return success, reason.strip()
     
 
     ############ Getter
@@ -134,19 +158,22 @@ class Scenario():
     
     ########## EXECUTION
     
-    def send_action(self, action : Dict):
+    def send_action(self, action : Dict, error_state : ActiveStageErrorState):
         """Send the tool call to the evaluation env"""
         tool_calls = {0 : action}
-        self.tool_executor.compute_actions(tool_calls)
+        self.tool_executor.compute_actions(tool_calls, error_state)
         return True
     
-    def execute_env_step(self) -> Dict:
-        """Execute one env step. Return a dict with status when tool is finish"""
+    def execute_env_step(self) -> Tuple[Dict,Dict]:
+        """Execute one env step. Return a tuple with:
+        - dict with status when tool is finish
+        - observation dict 
+        """
         if not self.env: raise ValueError("Env not initialized")
         action = self.tool_executor.step()
         obs, _, _, _, _ = self.env.step(action)
 
-        return self.tool_executor.verif_ended_tool(obs)
+        return self.tool_executor.verif_ended_tool(obs), obs
     
     def env_reset(self):
         if self.env: self.env.reset(seed=self.seed,options=self.tool_executor.get_env_options(0))
