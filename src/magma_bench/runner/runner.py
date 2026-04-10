@@ -270,16 +270,6 @@ class BenchmarkRunner():
                 
 
         return stageResult
-
-    # def add_stage_info(self, stage_id, instruction, task_attributes):
-    #     """Add a stage info to the benchark logs for later save."""
-    #     self._bench_logs.append(
-    #         {
-    #             "stage_id" : str(stage_id), 
-    #             "instruction" : instruction, 
-    #             "attributes": task_attributes
-    #             })
-
     
     def _run_scenario(self, scenario : Scenario):
         nb_tasks = scenario.nb_tasks
@@ -342,9 +332,7 @@ class BenchmarkRunner():
                 if self.per_task_log and try_output_path is not None:
                     scenario_result.export_task_log(task, try_output_path)
 
-            self.result_manager.push_scenario_result(scenario_result)
-
-            
+            self.result_manager.push_scenario_result(scenario_result) 
     
     def run(self, args):
         """Run the evaluation process on the pre-loaded benchmarks"""
@@ -363,8 +351,4 @@ class BenchmarkRunner():
         path = os.path.join(self.output_path, "result.json")
         with open(path,"w+") as f:
             json.dump(data,f,indent=2)
-        
-        # path = os.path.join(self.output_path, "info.json")
-        # with open(path,"w+") as f:
-        #     json.dump(self._bench_logs,f,indent=2)
                     
