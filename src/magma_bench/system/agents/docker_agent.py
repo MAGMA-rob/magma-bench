@@ -11,6 +11,7 @@ class DockerAgent(Agent):
         inputs.setdefault("inference_mode",True)
         try:
             ti = time.time()
+            print(inputs)
             response = requests.post(self.url, json=inputs, timeout=120)
             ti = time.time() - ti
             response.raise_for_status()

@@ -59,6 +59,7 @@ class BenchmarkRunner():
         worker = LMWorker(magma_config.backends[magma_config.benchmark["backend_verifier"]])
 
         self.num_try = magma_config.benchmark["num_eval"]
+        self._skip_metrics = False
 
         self.tool_executor : ToolsEvalExecutor = ToolsEvalExecutor(
             magma_config.magma_planner_address, 
@@ -202,16 +203,24 @@ class BenchmarkRunner():
                 # Verify if the stage is still valid
                 stageCounters.is_running_a_tool = False
                 stageCounters.end_of_action = False
+                fail_fast_on_verification_failure = not stage.should_act()
 
                 if stageCounters.catastrophic:
                     stageResult.success = False
                     stageResult.explanation = 'Launched a tool on a text-only stage'
                     stageCounters.catastrophic = False
                 else:
-                    try:
-                        stageResult.success, stageResult.explanation = scenario.evaluate_stage(stage, response_dict, obs)
-                    except:
-                        stageResult.success, stageResult.explanation = False, "Exception due to no tool call"
+                    should_evaluate_stage = not (stage.is_answer() and call_action != {})
+                    if should_evaluate_stage:
+                        try:
+                            stageResult.success, stageResult.explanation = scenario.evaluate_stage(stage, response_dict, obs)
+                        except:
+                            stageResult.success, stageResult.explanation = False, "Exception due to no tool call"
+                    else:
+                        # Tool-enabled answer stages must be judged only once the
+                        # model eventually provides a final text answer.
+                        stageResult.success = False
+                        stageResult.explanation = "Waiting for a final answer after tool execution."
 
                     # if a tool where called  
                     if call_action != {}:
@@ -251,6 +260,10 @@ class BenchmarkRunner():
                             )     
                         stageResult.success, stageResult.explanation = d['verdict'], d['explanation']
 
+                    fail_fast_on_verification_failure = (
+                        (not stage.should_act())
+                        or (stage.is_answer() and call_action == {})
+                    )
                     call_action.clear()
                     stageCounters.catastrophic = False
 
@@ -265,7 +278,7 @@ class BenchmarkRunner():
                         stageResult.success = (response_dict['action'] == {})
                     end_of_loop = True
                 else:
-                    if stageCounters.step_counter >= stage.max_agents_step:
+                    if fail_fast_on_verification_failure or stageCounters.step_counter >= stage.max_agents_step:
                         end_of_loop = True
                 
 
@@ -313,8 +326,9 @@ class BenchmarkRunner():
                         previous_stage_success = False
                         previous_status_instruction = None
                         continue
-
-                    instruction = json.loads(self.tool_executor.randomizer.traduce_attributes_to_llm(json.dumps(instruction)))
+                    
+                    if self.tool_executor.randomized:
+                        instruction = json.loads(self.tool_executor.randomizer.traduce_attributes_to_llm(json.dumps(instruction)))
 
                     stage_result = self._run_stage(scenario,stage,task_attributes,instruction)
 
@@ -327,24 +341,57 @@ class BenchmarkRunner():
                     if stage.should_reset_env():
                         scenario.env_reset()
                     
-                    scenario.save_video(f"{scenario.name}-try-{try_index}-task-{task_id}")
+                    scenario.save_video(f"{scenario.name}-try-{try_index}-task-{task.id}")
 
                 if self.per_task_log and try_output_path is not None:
                     scenario_result.export_task_log(task, try_output_path)
 
-            self.result_manager.push_scenario_result(scenario_result) 
+            if not self._skip_metrics:
+                self.result_manager.push_scenario_result(scenario_result) 
     
     def run(self, args):
         """Run the evaluation process on the pre-loaded benchmarks"""
         if not self._benchmark_configs:
             raise ValueError("There is no benchmark loaded. Please use .load(path) before run.")
+
+        self._skip_metrics = bool(getattr(args, "no_metrics", False))
+
+        selected_task_indices = getattr(args, "task_indices", None)
+        if selected_task_indices is not None and len(self._benchmark_configs) != 1:
+            raise ValueError("task_indices can only be used when executing exactly one scenario.")
         
         for bench_config in tqdm(self._benchmark_configs, desc="Scenarios", position=0, leave=True):
             scenario = ScenarioBuilder.load(bench_config, self.output_path, self.tool_executor, args)
+            if selected_task_indices is not None:
+                if len(set(selected_task_indices)) != len(selected_task_indices):
+                    raise ValueError(f"task_indices must not contain duplicates. Got {selected_task_indices}.")
+                task_by_index = {}
+                for task in scenario.tasks:
+                    suffix = str(task.id).rsplit("_", 1)[-1]
+                    try:
+                        task_index = int(suffix)
+                    except ValueError:
+                        continue
+                    task_by_index[task_index] = task
+
+                invalid_indices = [
+                    idx for idx in selected_task_indices
+                    if not isinstance(idx, int) or idx not in task_by_index
+                ]
+                if invalid_indices:
+                    available_indices = sorted(task_by_index.keys())
+                    raise ValueError(
+                        f"task_indices {invalid_indices} do not match any task id in scenario "
+                        f"{scenario.name}. Available task ids are {available_indices}."
+                    )
+                scenario.tasks = [task_by_index[idx] for idx in selected_task_indices]
+                scenario.nb_tasks = len(scenario.tasks)
             self._run_scenario(scenario)
             scenario.close()
 
         self.result_manager.stop()
+        if self._skip_metrics:
+            return
         data = self.result_manager.compute_global_metrics()
         data['system_info'] = self.system.get_system_card()
 

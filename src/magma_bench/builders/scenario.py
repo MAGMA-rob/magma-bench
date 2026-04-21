@@ -86,7 +86,9 @@ class Scenario():
                 if not error_state:
                     continue
                 try:
-                    task_ref.get_active_stage_error(0, error_state)
+                    active_errors = task_ref.get_active_stage_error(0, error_state)
+                    for error in active_errors:
+                        error.validate_arguments(error_state.get(error.get_name()))
                 except Exception as exc:
                     raise ValueError(
                         f"Task {task.id}, stage {stage.id}: invalid runtime_error injection. {exc}"

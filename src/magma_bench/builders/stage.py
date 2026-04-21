@@ -30,6 +30,7 @@ class Stage:
     answer_user: bool
     failure_flag: bool
     recovery_flag: bool
+    allow_tool_flag : bool
     injections: List[StageInjection]
     predicates : List[BaseGoal]
     _predicate_specs: List[Dict]
@@ -68,9 +69,28 @@ class Stage:
         self.answer_user = False
         self.failure_flag = False
         self.recovery_flag = False
+        self.allow_tool_flag = False
         self.injections = []
         self._should_reset_env = False
         self.keys_evaluator = []
+
+    def _extract_allows_tools(self, inputs: Dict, expected_behavior: str) -> bool:
+        if "allows_tools" not in inputs:
+            return False
+
+        allows_tools = inputs["allows_tools"]
+        if not isinstance(allows_tools, bool):
+            raise TypeError(
+                f"allows_tools must be a bool. Got {type(allows_tools)}."
+            )
+
+        if expected_behavior != "answer":
+            raise TypeError(
+                "Field 'allows_tools' is only supported for stages with "
+                "expected_behavior='answer'."
+            )
+
+        return allows_tools
 
     def _assert_only_allowed_fields(self, inputs: Dict, allowed_fields: set[str], mode_name: str):
         extra_fields = set(inputs) - allowed_fields
@@ -184,7 +204,7 @@ class Stage:
             injection = StageInjection(
                 mode=raw_injection.get("mode", ""),
                 error=raw_injection.get("error"),
-                arguments=raw_injection.get("arguments"),
+                arguments=raw_injection.get("arguments") or raw_injection.get("argument"),
                 message=raw_injection.get("message"),
             )
             injection.verify()
@@ -223,6 +243,12 @@ class Stage:
                 "not expecting an action or while missing predicates/log verifications."
             )
 
+        if force_injections and self.answer_user:
+            raise TypeError(
+                "A stage can not define force_recovery/force_failure injections together "
+                "with answer_to_user/flag_answer_to_user."
+            )
+
         if failure_injections and not self._has_action_goals() and self._comp_eval.get("logs", []) == []:
             raise TypeError(
                 "A stage marked as force_failure must define either an action_goal or a log eval."
@@ -257,7 +283,7 @@ class Stage:
 
     def should_act(self) -> bool:
         """Return True if the inner step should execute action"""
-        return self.expected_behavior == "act"
+        return self.allow_tool_flag
 
     def is_acknowledge(self) -> bool:
         return self.expected_behavior == "acknowledge"
@@ -311,6 +337,7 @@ class Stage:
 class AcknowledgeStage(Stage):
     def __init__(self, inputs: Dict, id: str) -> None:
         self._setup_base(id, "acknowledge")
+        self._extract_allows_tools(inputs, "acknowledge")
         self._assert_only_allowed_fields(
             inputs,
             {"instruction", "expected_behavior", "timestamp"},
@@ -335,6 +362,7 @@ class AnswerStage(Stage):
                 "should_reset_env",
                 "should_env_reset",
                 "should_reset",
+                "allows_tools",
             },
             "answer",
         )
@@ -348,6 +376,7 @@ class AnswerStage(Stage):
             )
         self._should_reset_env = self._extract_should_reset_env(inputs)
         self.keys_evaluator = self._parse_keys_evaluator(inputs.get("keys_evaluator", []))
+        self.allow_tool_flag = self._extract_allows_tools(inputs, "answer")
         self._update_stage_horizon()
 
 class ActStage(Stage):
@@ -361,6 +390,7 @@ class ActStage(Stage):
 
     def __init__(self, inputs: Dict, id: str) -> None:
         self._setup_base(id, "act")
+        self._extract_allows_tools(inputs, "act")
         self._init_act_instruction(inputs)
         self.max_agents_step = self._get_positive_max_step(inputs)
         self._predicate_specs = self._parse_predicate_specs(inputs.get("action_goal", []))
@@ -371,3 +401,4 @@ class ActStage(Stage):
         self._should_reset_env = self._extract_should_reset_env(inputs)
         self.keys_evaluator = self._parse_keys_evaluator(inputs.get("keys_evaluator", []))
         self._update_stage_horizon()
+        self.allow_tool_flag = True

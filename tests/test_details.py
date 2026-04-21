@@ -64,9 +64,40 @@ sys.modules["magma_scenarios.benchmark"] = benchmark_module
 
 data_structures_module = types.ModuleType("magma_core.base.data_structures")
 data_structures_module.ActiveStageErrorState = dict
+goals_module = types.ModuleType("magma_core.base.goals")
+
+
+class _BaseGoal:
+    pass
+
+
+class _Goal(_BaseGoal):
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+
+
+goals_module.BaseGoal = _BaseGoal
+goals_module.And = _Goal
+goals_module.At = _Goal
+goals_module.AtLeastCountAt = _Goal
+goals_module.NotAt = _Goal
+goals_module.On = _Goal
+goals_module.Or = _Goal
+
+text_utils_module = types.ModuleType("magma_core.utils.text_utils")
+text_utils_module.star_extractor = lambda entity_names, pattern: [
+    name for name in entity_names if pattern.replace("*", "") in name
+]
+
 sys.modules["magma_core"] = types.ModuleType("magma_core")
-sys.modules["magma_core.base"] = types.ModuleType("magma_core.base")
+base_module = types.ModuleType("magma_core.base")
+base_module.__path__ = []
+sys.modules["magma_core.base"] = base_module
 sys.modules["magma_core.base.data_structures"] = data_structures_module
+sys.modules["magma_core.base.goals"] = goals_module
+sys.modules["magma_core.utils"] = types.ModuleType("magma_core.utils")
+sys.modules["magma_core.utils.text_utils"] = text_utils_module
 
 magma_bench_pkg = types.ModuleType("magma_bench")
 magma_bench_pkg.__path__ = [str(SRC_ROOT / "magma_bench")]
@@ -141,26 +172,72 @@ def test_answer_stage_accepts_complementary_verif_and_keys_evaluator():
     assert stage.get_evaluation_elements() == ([], {"judge": "The model answers area1."})
 
 
-@pytest.mark.parametrize(
-    "extra_field",
-    [
-        {"action_goal": [{"predicate": "in", "args": ["obj", "area1"]}]},
-        {"injection": {"mode": "force_recovery"}},
-        {"default_instruction": {"author": "status", "content": "done"}},
-        {"answer_to_user": True},
-    ],
-)
-def test_answer_stage_rejects_forbidden_fields(extra_field):
+def test_answer_stage_can_opt_in_to_tools():
+    stage = Stage(
+        {
+            "instruction": "Check the inventory before answering.",
+            "expected_behavior": "answer",
+            "complementary_verif": {"judge": "The model answers with the fetched quantity."},
+            "allows_tools": True,
+            "max_step": 2,
+        },
+        id="stage0",
+    )
+
+    assert stage.is_answer()
+    assert stage.should_act()
+    assert not stage.is_text_only()
+    assert stage.max_agents_step == 2
+
+
+def test_answer_stage_rejects_non_boolean_allows_tools():
     with pytest.raises(TypeError):
         Stage(
             {
                 "instruction": "Where should object A go?",
                 "expected_behavior": "answer",
                 "complementary_verif": {"judge": "The model answers area1."},
-                **extra_field,
+                "allows_tools": "yes",
             },
             id="stage0",
         )
+
+
+@pytest.mark.parametrize(
+    ("expected_behavior", "extra_field"),
+    [
+        ("answer", {"action_goal": [{"predicate": "in", "args": ["obj", "area1"]}]}),
+        ("answer", {"injection": {"mode": "force_recovery"}}),
+        ("answer", {"default_instruction": {"author": "status", "content": "done"}}),
+        ("answer", {"answer_to_user": True}),
+        ("acknowledge", {"allows_tools": True}),
+        ("act", {"allows_tools": True}),
+    ],
+)
+def test_non_supported_stage_fields_raise(expected_behavior, extra_field):
+    payload = {
+        "instruction": "Where should object A go?",
+        **extra_field,
+    }
+    if expected_behavior == "answer":
+        payload.update(
+            {
+                "expected_behavior": "answer",
+                "complementary_verif": {"judge": "The model answers area1."},
+            }
+        )
+    elif expected_behavior == "acknowledge":
+        payload["expected_behavior"] = "acknowledge"
+    else:
+        payload.update(
+            {
+                "max_step": 1,
+                "action_goal": [],
+            }
+        )
+
+    with pytest.raises(TypeError):
+        Stage(payload, id="stage0")
 
 
 def test_act_stage_behavior_is_still_supported():
@@ -178,6 +255,29 @@ def test_act_stage_behavior_is_still_supported():
     assert not stage.is_text_only()
     assert stage.max_agents_step == 2
     assert stage.keys_evaluator == ["c-reasoning"]
+
+
+@pytest.mark.parametrize(
+    ("answer_flag_key", "injection_mode"),
+    [
+        ("answer_to_user", "force_failure"),
+        ("flag_answer_to_user", "force_failure"),
+        ("answer_to_user", "force_recovery"),
+        ("flag_answer_to_user", "force_recovery"),
+    ],
+)
+def test_act_stage_rejects_answer_to_user_with_forced_error_injection(answer_flag_key, injection_mode):
+    with pytest.raises(TypeError):
+        Stage(
+            {
+                "instruction": "Launch a cycle.",
+                "max_step": 2,
+                "action_goal": [{"predicate": "in", "args": ["ref_obj_*", "area1"]}],
+                answer_flag_key: True,
+                "injection": {"mode": injection_mode},
+            },
+            id="stage0",
+        )
 
 
 def test_multi_steps_propagates_only_on_null_instruction_chain():

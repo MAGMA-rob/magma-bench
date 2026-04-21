@@ -133,10 +133,6 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
         action = self.step()
         _ , _, _, _,_ = self.env.step(action)
         if auto_compute:
-            print("--")
-            print('auto-compute')
-            print(calls)
-            print("---")
             self.compute_actions(calls, error_state=error_state)
 
 
