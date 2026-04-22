@@ -49,6 +49,7 @@ class MagmaDual(LocalSystem):
         with self.memory_update_lock:
             payload = {
                 "instruction": self.stringify_content(query.get("content", "")),
+                "instruction_role": query.get("author"),
                 "attributes": task_attributes,
                 "memory": self.memory,
                 "function": self.tools,
@@ -66,12 +67,16 @@ class MagmaDual(LocalSystem):
             print(f"[MagmaLLM] Error in Format: {response_dict}")
             return {"error": "No action found in response"}
 
-        self._add_mess_to_history(query, say, t + model_mess_time)
-
         if isinstance(ac, str):
             try:
                 response_dict['action'] = json.loads(ac)
             except:
                 response_dict["action"] = {}
+        self._add_mess_to_history(
+            query,
+            say,
+            response_dict.get("action"),
+            t + model_mess_time,
+        )
         self.compute_memory(think, say)
         return response_dict

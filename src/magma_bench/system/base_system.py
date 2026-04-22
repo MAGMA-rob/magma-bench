@@ -5,6 +5,11 @@ from typing import List, Dict, Any
 import threading
 import json
 
+from magma_core.utils.text_utils import (
+    format_history_message,
+    format_model_history_message,
+)
+
 class System(ABC):
     """
     This class englobs your multi-agent systems or unique agents to interact with the Benchmark
@@ -106,7 +111,13 @@ class LocalSystem(System, ABC):
         self.memory = inputs.get("memory",[])
         self.preserved_memory_indices = inputs.get("preserved_memory_indices",[])
 
-    def _add_mess_to_history(self, query : Dict, model_answer : str, model_answer_timestamps = None) -> None:
+    def _add_mess_to_history(
+        self,
+        query: Dict,
+        model_answer: Any,
+        model_action: Any = None,
+        model_answer_timestamps=None,
+    ) -> None:
         """
         Append the interaction step to the message history.
         """
@@ -115,16 +126,16 @@ class LocalSystem(System, ABC):
         
         self.message_history.extend(
             [
-                {
-                    "author": query['author'],
-                    "sentence": self.stringify_content(query['content']),
-                    "timestamp": query['timestamp']
-                },
-                {
-                    "author" : "model",
-                    "sentence": model_answer,
-                    "timestamp": model_answer_timestamps
-                }
+                format_history_message(
+                    query.get("author","user"),
+                    query.get("content"),
+                    query["timestamp"],
+                ),
+                format_model_history_message(
+                    model_answer,
+                    model_action,
+                    model_answer_timestamps,
+                ),
             ])
 
         while len(self.message_history) > self.max_history_length:

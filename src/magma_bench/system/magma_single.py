@@ -2,6 +2,11 @@ from typing import Dict, List
 import time, os, json
 import asyncio, threading, requests
 
+from magma_core.utils.text_utils import (
+    format_history_message,
+    format_model_history_message,
+)
+
 from .base_system import LocalSystem
 from .agents import Agent, DockerAgent
 
@@ -47,6 +52,7 @@ class MagmaSingle(LocalSystem):
         with self.memory_update_lock:
             payload = {
                 "instruction": self.stringify_content(query.get("content", "")),
+                "instruction_role": query.get("author"),
                 "attributes": task_attributes,
                 "memory": self.memory,
                 "function": self.tools,
@@ -65,13 +71,18 @@ class MagmaSingle(LocalSystem):
             print(f"[MagmaLLM] Error in Format: {response_dict}")
             return {"error": "No action found in response"}
 
-        self._add_mess_to_history(query, say, t + model_mess_time)
-
         if isinstance(ac, str):
             try:
                 response_dict['action'] = json.loads(ac)
             except:
                 response_dict["action"] = {}
+
+        self._add_mess_to_history(
+            query,
+            say,
+            response_dict.get("action"),
+            t + model_mess_time,
+        )
 
         if memory_update:
             self._update_memory([
@@ -86,20 +97,26 @@ class MagmaSingle(LocalSystem):
     def _get_recent_messages(self, current_time: float) -> List[Dict]:
         return self.message_history
     
-    def _add_mess_to_history(self, query: Dict, model_answer: str, model_answer_timestamps=None) -> None:
+    def _add_mess_to_history(
+        self,
+        query: Dict,
+        model_answer,
+        model_action=None,
+        model_answer_timestamps=None,
+    ) -> None:
         if not model_answer_timestamps or not isinstance(model_answer_timestamps, float):
             model_answer_timestamps = query['timestamp']+10
         
         self.message_history.extend(
             [
-                {
-                    "author": query['author'],
-                    "sentence": self.stringify_content(query['content']),
-                    "timestamp": query['timestamp']
-                },
-                {
-                    "author" : "model",
-                    "sentence": model_answer,
-                    "timestamp": model_answer_timestamps
-                }
+                format_history_message(
+                    query.get("author","user"),
+                    query.get("content"),
+                    query["timestamp"],
+                ),
+                format_model_history_message(
+                    model_answer,
+                    model_action,
+                    model_answer_timestamps,
+                ),
             ])

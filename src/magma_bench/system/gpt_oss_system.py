@@ -54,8 +54,8 @@ class GPTMagma(LocalSystem):
 
         for m in self.message_history:
             mess.append({
-                "role" : m['author'],
-                "content" : m['sentence']
+                "role" : "assistant" if m.get("author") == "model" else m.get("author", "user"),
+                "content" : m.get("content", m.get("sentence", ""))
             })
 
         mess.append({'role': 'user', 'content': prompt_user})
@@ -71,7 +71,7 @@ class GPTMagma(LocalSystem):
         say = response_dict['say']
         think = response_dict['intent']
 
-        self._add_mess_to_history(query,f"{say}, {response_dict['action']}")
+        self._add_mess_to_history(query, say, response_dict.get("action"))
 
         self.compute_memory(think, say)
         
