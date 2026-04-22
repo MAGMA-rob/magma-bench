@@ -30,6 +30,11 @@ def parse_args():
     )
     parser.add_argument("--videos", action="store_true", help="If specified, enable video export.")
     parser.add_argument(
+        "--skip_judge",
+        action="store_true",
+        help="If specified, bypass text judge verification for fast local tests.",
+    )
+    parser.add_argument(
         "--verifier_backend", "-vb",
         type=str,
         help="Which backend instance to use for the verifier.",
@@ -73,16 +78,18 @@ def main(args: argparse.Namespace):
     override_dict["benchmark"].pop("scenario", None)
     override_dict["benchmark"].pop("task_indices", None)
     override_dict["benchmark"].pop("no_metrics", None)
+    override_dict["benchmark"].pop("skip_judge", None)
     override_dict["benchmark"]["logs"] = True
 
     default_path = resolve_config_path(args.config_path)
-    magma_config = MAGMAConfig.load(default_path)
+    magma_config = MAGMAConfig.load(default_path, accept_no_backend=args.skip_judge)
     magma_config.override_with_dict(override_dict)
 
     runner = BenchmarkRunner(
         args.system,
         magma_config=magma_config,
         class_specific_args=args.extra,
+        skip_backends=args.skip_judge,
     )
     runner.load_benchmark(None, [args.scenario])
 

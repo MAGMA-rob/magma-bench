@@ -40,25 +40,35 @@ class BenchmarkRunner():
             self,
             system_class_name : str,
             magma_config : MAGMAConfig,
-            class_specific_args : Dict
+            class_specific_args : Dict,
+            skip_backends: bool = False,
         ) -> None:
+        benchmark_config = magma_config.benchmark
+        self._skip_backends = skip_backends
+        if self._skip_backends and system_class_name != "MagmaSingle":
+            raise ValueError("skip_backends=True is only supported with MagmaSingle.")
+
         System_class : Type[System] = load_module_from_name(system_pkg, system_class_name)
         if "Magma" in system_class_name:
             class_specific_args["agent_url"] = magma_config.magma_agent_address
-        verifier_backend = magma_config.backends[magma_config.benchmark["backend_verifier"]]
-        class_specific_args.setdefault("backend_url",verifier_backend.endpoint) # TO DO: Dedicated option
-        class_specific_args.setdefault("backend_header",verifier_backend.headers) # TO DO: Dedicated option
+
+        verifier_backend = None
+        if not self._skip_backends:
+            verifier_backend = magma_config.backends[benchmark_config["backend_verifier"]]
+            class_specific_args.setdefault("backend_url",verifier_backend.endpoint) # TO DO: Dedicated option
+            class_specific_args.setdefault("backend_header",verifier_backend.headers) # TO DO: Dedicated option
+
         self.system = System_class(**class_specific_args)
 
         self.benchmarks = []
-        self.output_path = os.path.join(magma_config.benchmark["save_dir"],self.system.system_name, datetime.now().strftime("%m-%d_%H-%M"))
+        self.output_path = os.path.join(benchmark_config["save_dir"],self.system.system_name, datetime.now().strftime("%m-%d_%H-%M"))
 
-        self.per_task_log = magma_config.benchmark["logs"]
+        self.per_task_log = benchmark_config["logs"]
         print(self.per_task_log)
-        self.result_manager = ResultManager(self.output_path, magma_config.benchmark["logs"], magma_config.benchmark["num_eval"]==1)
-        worker = LMWorker(magma_config.backends[magma_config.benchmark["backend_verifier"]])
+        self.result_manager = ResultManager(self.output_path, benchmark_config["logs"], benchmark_config["num_eval"]==1)
+        worker = None if self._skip_backends else LMWorker(verifier_backend)
 
-        self.num_try = magma_config.benchmark["num_eval"]
+        self.num_try = benchmark_config["num_eval"]
         self._skip_metrics = False
 
         self.tool_executor : ToolsEvalExecutor = ToolsEvalExecutor(
@@ -66,6 +76,13 @@ class BenchmarkRunner():
             worker, nb_env=1, 
             randomize_variation=self.num_try
         )
+        if self._skip_backends:
+            original_verif = self.tool_executor.verif_complementary_bench
+
+            def _verif_without_judge(model_say: str, log_ref, judge_verif):
+                return original_verif(model_say, log_ref, None)
+
+            self.tool_executor.verif_complementary_bench = _verif_without_judge
     
     def load_benchmark(self, criteria, scenario) -> bool:
         """Load one benchmark to evaluate the system on"""
@@ -205,67 +222,73 @@ class BenchmarkRunner():
                 stageCounters.end_of_action = False
                 fail_fast_on_verification_failure = not stage.should_act()
 
-                if stageCounters.catastrophic:
+                if stage.expected_behavior == "act" and call_action == {}:
+                    stageResult.success = False
+                    stageResult.explanation = 'Forget to call a tool on a act stage'
+                    stageCounters.catastrophic = False
+                    return stageResult
+                elif stageCounters.catastrophic:
                     stageResult.success = False
                     stageResult.explanation = 'Launched a tool on a text-only stage'
                     stageCounters.catastrophic = False
+                    return stageResult
+                
+                should_evaluate_stage = not (stage.is_answer() and call_action != {})
+                if should_evaluate_stage:
+                    try:
+                        stageResult.success, stageResult.explanation = scenario.evaluate_stage(stage, response_dict, obs, not self._skip_backends)
+                    except:
+                        stageResult.success, stageResult.explanation = False, "Exception due to no tool call"
                 else:
-                    should_evaluate_stage = not (stage.is_answer() and call_action != {})
-                    if should_evaluate_stage:
-                        try:
-                            stageResult.success, stageResult.explanation = scenario.evaluate_stage(stage, response_dict, obs)
-                        except:
-                            stageResult.success, stageResult.explanation = False, "Exception due to no tool call"
-                    else:
-                        # Tool-enabled answer stages must be judged only once the
-                        # model eventually provides a final text answer.
+                    # Tool-enabled answer stages must be judged only once the
+                    # model eventually provides a final text answer.
+                    stageResult.success = False
+                    stageResult.explanation = "Waiting for a final answer after tool execution."
+
+                # if a tool where called  
+                if call_action != {}:
+                    if status_dict == {}:
+                        raise RuntimeError("Empty status dict while having executed an action")
+                    
+                    # update env status with failure
+                    if stageResult.success and (should_recover or stage.has_flag_failure()):
+                        # If the stage is successfull + marked as recovery but we haven't done it yet.
+                        status_dict = build_fake_execution_fail(
+                            call_action, status_dict,
+                            stage.get_error_flag()
+                        )
+                        self.tool_executor.ask_for_retry([0],False,auto_compute=False, error_state=error_state)
+                        stageCounters.step_counter-=1
                         stageResult.success = False
-                        stageResult.explanation = "Waiting for a final answer after tool execution."
-
-                    # if a tool where called  
-                    if call_action != {}:
-                        if status_dict == {}:
-                            raise RuntimeError("Empty status dict while having executed an action")
+                        if not should_recover: #only in force_failure, count the number of model errors before informing about the failure case
+                            stageCounters.planner_error_count+=1
+                            if stageCounters.planner_error_count > 4:
+                                stageResult.success = False
+                                stageResult.explanation = "The models persist in its error more than 4 times"
+                                return stageResult
+                        else:
+                            stageCounters.planner_error_count = 0
+                        should_recover = False
                         
-                        # update env status with failure
-                        if stageResult.success and (should_recover or stage.has_flag_failure()):
-                            # If the stage is successfull + marked as recovery but we haven't done it yet.
-                            status_dict = build_fake_execution_fail(
-                                call_action, status_dict,
-                                stage.get_error_flag()
-                            )
-                            self.tool_executor.ask_for_retry([0],False,auto_compute=False, error_state=error_state)
-                            stageCounters.step_counter-=1
-                            stageResult.success = False
-                            if not should_recover: #only in force_failure, count the number of model errors before informing about the failure case
-                                stageCounters.planner_error_count+=1
-                                if stageCounters.planner_error_count > 4:
-                                    stageResult.success = False
-                                    stageResult.explanation = "The models persist in its error more than 4 times"
-                                    return stageResult
-                            else:
-                                stageCounters.planner_error_count = 0
-                            should_recover = False
-                            
-                        # build returned instruction
-                        instruction = self._make_answer("SYSTEM", status_dict)
-                        stageResult.conversation.append(instruction)
+                    # build returned instruction
+                    instruction = self._make_answer("SYSTEM", status_dict)
+                    stageResult.conversation.append(instruction)
 
-                    # if no tools where called, check model text response
-                    elif stage.has_flag_failure() and not should_recover:
-                        d = self.tool_executor.verif_complementary_bench(
-                            response_dict['say'], None, 
-                            f"The model must inform the user that an error happens" 
-                            #this error happens : {stage.force_failure}. It is not strict, the model can just inform of the failure state."
-                            )     
-                        stageResult.success, stageResult.explanation = d['verdict'], d['explanation']
+                # if no tools where called, check model text response
+                elif stage.has_flag_failure() and not should_recover:
+                    d = self.tool_executor.verif_complementary_bench(
+                        response_dict['say'], None, 
+                        f"The model must inform the user that an error happens" 
+                        #this error happens : {stage.force_failure}. It is not strict, the model can just inform of the failure state."
+                        )     
+                    stageResult.success, stageResult.explanation = d['verdict'], d['explanation']
 
-                    fail_fast_on_verification_failure = (
-                        (not stage.should_act())
-                        or (stage.is_answer() and call_action == {})
-                    )
-                    call_action.clear()
-                    stageCounters.catastrophic = False
+                fail_fast_on_verification_failure = (
+                    (not stage.should_act())
+                    or (stage.is_answer() and call_action == {})
+                )
+                call_action.clear()
+                stageCounters.catastrophic = False
 
                 # check user response in case of stage sucess                
                 if stageResult.success:

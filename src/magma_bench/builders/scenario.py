@@ -105,7 +105,7 @@ class Scenario():
 
     ############ EVAL
 
-    def evaluate_stage(self, stage : Stage, model_response : Dict, obs : Dict) -> Tuple[bool, str]:
+    def evaluate_stage(self, stage : Stage, model_response : Dict, obs : Dict, do_judge : bool) -> Tuple[bool, str]:
         """
         Allows to return for a specific Step if the step is marked as successfull or not
         return a tuple bool, str -> boolean success and reason
@@ -127,7 +127,7 @@ class Scenario():
 
         if success and complementary_verif: #no need to check this if predicates fails
             log_ref = complementary_verif.get("logs",None)
-            judge = complementary_verif.get("judge", None)
+            judge = complementary_verif.get("judge", None) if do_judge else None
 
             out_dict = self.tool_executor.verif_complementary_bench(model_say, log_ref, judge)
             if not out_dict['verdict']: success = False

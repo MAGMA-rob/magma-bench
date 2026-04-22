@@ -246,9 +246,9 @@ def test_answer_stage_with_tools_is_judged_only_on_final_text_answer():
     assert scenario.evaluate_calls[0][1]["action"] == {}
     assert [message["author"] for message in result.conversation] == [
         "user",
-        "model",
-        "status",
-        "model",
+        "MODEL",
+        "SYSTEM",
+        "MODEL",
     ]
 
 
@@ -276,8 +276,8 @@ def test_answer_stage_with_tools_does_not_call_judge_before_final_answer():
     assert scenario.evaluate_calls == []
     assert [message["author"] for message in result.conversation] == [
         "user",
-        "model",
-        "status",
+        "MODEL",
+        "SYSTEM",
     ]
 
 
@@ -305,7 +305,7 @@ def test_text_only_stage_stops_immediately_after_failed_verification():
     assert len(scenario.evaluate_calls) == 1
     assert [message["author"] for message in result.conversation] == [
         "user",
-        "model",
+        "MODEL",
     ]
 
 
@@ -338,9 +338,9 @@ def test_tool_enabled_answer_stage_stops_immediately_after_failed_final_answer()
     assert scenario.evaluate_calls[0][1]["action"] == {}
     assert [message["author"] for message in result.conversation] == [
         "user",
-        "model",
-        "status",
-        "model",
+        "MODEL",
+        "SYSTEM",
+        "MODEL",
     ]
 
 
@@ -470,3 +470,82 @@ def test_run_scenario_uses_real_task_id_in_video_name(monkeypatch):
     runner._run_scenario(FakeScenario())
 
     assert video_names == ["demo-try-0-task-task_42"]
+
+
+def test_runner_init_can_skip_backends_for_magma_single(monkeypatch):
+    state = {
+        "lmworker_calls": [],
+        "system_kwargs": None,
+        "executor_worker": "unset",
+        "judge_calls": [],
+    }
+
+    class FakeSystemClass:
+        def __init__(self, **kwargs):
+            state["system_kwargs"] = kwargs
+            self.system_name = "demo_system"
+
+    class FakeResultManager:
+        def __init__(self, *_args, **_kwargs):
+            return None
+
+    class FakeToolsEvalExecutor:
+        def __init__(self, _planner_endpoint, worker, nb_env=1, randomize_variation=0):
+            state["executor_worker"] = worker
+
+        def verif_complementary_bench(self, model_say, log_ref, judge_verif):
+            state["judge_calls"].append((model_say, log_ref, judge_verif))
+            return {
+                "verdict": True,
+                "explanation": f"log_ref={log_ref}, judge_verif={judge_verif}",
+            }
+
+    monkeypatch.setattr(runner_module, "load_module_from_name", lambda *_args, **_kwargs: FakeSystemClass)
+    monkeypatch.setattr(runner_module, "ResultManager", FakeResultManager)
+    monkeypatch.setattr(runner_module, "ToolsEvalExecutor", FakeToolsEvalExecutor)
+    monkeypatch.setattr(
+        runner_module,
+        "LMWorker",
+        lambda backend: state["lmworker_calls"].append(backend) or object(),
+    )
+
+    config = SimpleNamespace(
+        benchmark={
+            "save_dir": "/tmp/out",
+            "logs": True,
+            "num_eval": 1,
+        },
+        backends={},
+        magma_agent_address="http://agent",
+        magma_planner_address="http://planner",
+    )
+
+    runner = BenchmarkRunner("MagmaSingle", config, class_specific_args={}, skip_backends=True)
+    out = runner.tool_executor.verif_complementary_bench(
+        "final answer",
+        [{"action": "demo"}],
+        "must be checked by judge",
+    )
+
+    assert state["lmworker_calls"] == []
+    assert state["executor_worker"] is None
+    assert state["system_kwargs"] == {"agent_url": "http://agent"}
+    assert state["judge_calls"] == [("final answer", [{"action": "demo"}], None)]
+    assert out["verdict"] is True
+    assert "judge_verif=None" in out["explanation"]
+
+
+def test_runner_init_rejects_skip_backends_for_non_magma_single():
+    config = SimpleNamespace(
+        benchmark={
+            "save_dir": "/tmp/out",
+            "logs": True,
+            "num_eval": 1,
+        },
+        backends={},
+        magma_agent_address="http://agent",
+        magma_planner_address="http://planner",
+    )
+
+    with pytest.raises(ValueError, match="skip_backends=True is only supported with MagmaSingle"):
+        BenchmarkRunner("StandaloneAgentSystem", config, class_specific_args={}, skip_backends=True)
