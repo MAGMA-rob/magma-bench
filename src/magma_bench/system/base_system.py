@@ -127,7 +127,7 @@ class LocalSystem(System, ABC):
         self.message_history.extend(
             [
                 format_history_message(
-                    query.get("author","user"),
+                    query.get("author", "USER"),
                     query.get("content"),
                     query["timestamp"],
                 ),

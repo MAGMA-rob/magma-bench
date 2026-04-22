@@ -42,7 +42,7 @@ def _normalize_stage_reason(task_record) -> str:
 
 def _export_conversation_message(message: Dict[str, Any]) -> Dict[str, Any]:
     exported_message = dict(message)
-    if exported_message.get("author") != "status":
+    if exported_message.get("author") != "SYSTEM":
         return exported_message
 
     content = exported_message.get("content")

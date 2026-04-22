@@ -105,7 +105,7 @@ class Stage:
         if not isinstance(instruction, str) or instruction == "":
             raise ValueError("Stages with an explicit instruction must define a non-empty string in 'instruction'.")
         timestamp = inputs.get("timestamp", 0)
-        return {"author": "user", "content": instruction, "timestamp": timestamp}
+        return {"author": "USER", "content": instruction, "timestamp": timestamp}
 
     def _init_act_instruction(self, inputs: Dict):
         instruction = inputs.get("instruction", None)
@@ -122,11 +122,15 @@ class Stage:
                         f"'content' field (str) : {self.default_instruction}"
                     )
                 role = self.default_instruction.get("author", None)
-                if role not in ["status", "user"]:
+                if role not in ["SYSTEM", "USER", "status", "system", "user"]:
                     raise TypeError(
-                        "You need to define a valid author (status/user) in the "
+                        "You need to define a valid author (SYSTEM/USER) in the "
                         f"default_instruction in the field 'author'. Got {role}"
                     )
+                if role in ["status", "system"]:
+                    self.default_instruction["author"] = "SYSTEM"
+                elif role == "user":
+                    self.default_instruction["author"] = "USER"
                 self.default_instruction.setdefault("timestamp", 0)
             return
 

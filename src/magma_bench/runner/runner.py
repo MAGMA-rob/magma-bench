@@ -94,7 +94,7 @@ class BenchmarkRunner():
         Return the latest status message produced during a stage execution.
         """
         for message in reversed(conversation):
-            if message.get("author") == "status":
+            if message.get("author") == "SYSTEM":
                 return message
         return None
 
@@ -148,7 +148,7 @@ class BenchmarkRunner():
                 stageCounters.step_counter+=1
                 # get model answer
                 response_dict = self.system.compute_answer(instruction, task_attributes)
-                model_answer = self._make_answer("model", response_dict)
+                model_answer = self._make_answer("MODEL", response_dict)
                 stageResult.conversation.append(model_answer)
                         
                 # process action
@@ -248,7 +248,7 @@ class BenchmarkRunner():
                             should_recover = False
                             
                         # build returned instruction
-                        instruction = self._make_answer("status", status_dict)
+                        instruction = self._make_answer("SYSTEM", status_dict)
                         stageResult.conversation.append(instruction)
 
                     # if no tools where called, check model text response
@@ -273,7 +273,7 @@ class BenchmarkRunner():
                     if stage.has_flag_answer_to_user():
                         # get model answer
                         response_dict = self.system.compute_answer(instruction,task_attributes)
-                        answer = self._make_answer("model", response_dict)
+                        answer = self._make_answer("MODEL", response_dict)
                         stageResult.conversation.append(answer)
                         stageResult.success = (response_dict['action'] == {})
                     end_of_loop = True

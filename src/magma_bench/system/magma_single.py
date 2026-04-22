@@ -107,16 +107,15 @@ class MagmaSingle(LocalSystem):
         if not model_answer_timestamps or not isinstance(model_answer_timestamps, float):
             model_answer_timestamps = query['timestamp']+10
         
-        self.message_history.extend(
-            [
-                format_history_message(
-                    query.get("author","user"),
-                    query.get("content"),
-                    query["timestamp"],
-                ),
-                format_model_history_message(
-                    model_answer,
-                    model_action,
-                    model_answer_timestamps,
-                ),
-            ])
+        self.message_history += [
+            format_history_message(
+                query.get("author", "USER"),
+                query.get("content"),
+                query["timestamp"],
+            ),
+            format_model_history_message(
+                model_answer,
+                model_action,
+                model_answer_timestamps,
+            ),
+        ]

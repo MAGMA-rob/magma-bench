@@ -1,7 +1,7 @@
 from typing import Dict, List
 import json, os, requests, asyncio
 
-from .agents import OllamaAgent, QwenOllamaAgent, DockerAgent
+from .agents import OllamaAgent, QwenOllamaAgent, DockerAgent, map_pipeline_role_to_chat_role
 from .base_system import LocalSystem
 
 class QwenMagma(LocalSystem):
@@ -53,11 +53,11 @@ class QwenMagma(LocalSystem):
 
         for m in self.message_history:
             mess.append({
-                "role" : "assistant" if m.get("author") == "model" else m.get("author", "user"),
+                "role" : map_pipeline_role_to_chat_role(m.get("author")),
                 "content" : m.get("content", m.get("sentence", ""))
             })
 
-        mess.append({'role': 'user', 'content': prompt_user})
+        mess.append({'role': map_pipeline_role_to_chat_role(query.get("author")), 'content': prompt_user})
 
         data = {
             'messages': mess

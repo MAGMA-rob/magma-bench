@@ -1,7 +1,7 @@
 from typing import Dict, List
 import json, requests, time, re, os
 
-from .agents import OllamaAgent, GPTOllamaAgent, QwenOllamaAgent, DockerAgent
+from .agents import OllamaAgent, GPTOllamaAgent, QwenOllamaAgent, DockerAgent, map_pipeline_role_to_chat_role
 from .base_system import System
 
 
@@ -44,7 +44,7 @@ class StandaloneAgentSystem(System):
         for m in self.message_history:
             mess.append(m)
 
-        mess.append({'role': 'user', 'content': prompt_user})
+        mess.append({'role': map_pipeline_role_to_chat_role(query.get("author")), 'content': prompt_user})
 
         data = {
             'messages': mess
