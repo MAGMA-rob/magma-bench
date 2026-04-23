@@ -79,8 +79,13 @@ class BenchmarkRunner():
         if self._skip_backends:
             original_verif = self.tool_executor.verif_complementary_bench
 
-            def _verif_without_judge(model_say: str, log_ref, judge_verif):
-                return original_verif(model_say, log_ref, None)
+            def _verif_without_judge(model_say: str, complementary_verif):
+                if complementary_verif is None:
+                    return original_verif(model_say, None)
+
+                effective_complementary_verif = dict(complementary_verif)
+                effective_complementary_verif.pop("judge", None)
+                return original_verif(model_say, effective_complementary_verif)
 
             self.tool_executor.verif_complementary_bench = _verif_without_judge
     
@@ -277,10 +282,12 @@ class BenchmarkRunner():
                 # if no tools where called, check model text response
                 elif stage.has_flag_failure() and not should_recover:
                     d = self.tool_executor.verif_complementary_bench(
-                        response_dict['say'], None, 
-                        f"The model must inform the user that an error happens" 
+                        response_dict['say'],
+                        {
+                            "judge": f"The model must inform the user that an error happens"
+                        }
                         #this error happens : {stage.force_failure}. It is not strict, the model can just inform of the failure state."
-                        )     
+                        )
                     stageResult.success, stageResult.explanation = d['verdict'], d['explanation']
 
                 fail_fast_on_verification_failure = (
@@ -299,6 +306,7 @@ class BenchmarkRunner():
                         answer = self._make_answer("MODEL", response_dict)
                         stageResult.conversation.append(answer)
                         stageResult.success = (response_dict['action'] == {})
+                        if not stageResult.success: stageResult.explanation = "Add a call on the final answer."
                     end_of_loop = True
                 else:
                     if fail_fast_on_verification_failure or stageCounters.step_counter >= stage.max_agents_step:

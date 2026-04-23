@@ -136,11 +136,24 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             self.compute_actions(calls, error_state=error_state)
 
 
+    def _verif_log_rules(self, log_rules: List[Any], logs: List[Log]) -> Tuple[bool, str]:
+        verdict = True
+        reasons = []
+
+        for rule in log_rules:
+            rule_verdict, reason = rule.verify(logs)
+            if not rule_verdict:
+                verdict = False
+            reason = reason.strip()
+            if reason:
+                reasons.append(reason)
+
+        return verdict, " - ".join(reasons)
+
     def verif_complementary_bench(
             self,
             model_say : str,
-            log_ref : Optional[List],
-            judge_verif : Optional[str]
+            complementary_verif : Optional[Dict[str, Any]]
         ) -> Dict:
         """
         Benchmark only.
@@ -149,22 +162,38 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
 
         Return a dict with a bool 'verdict' and a string 'explanation'.
         """
+        complementary_verif = {} if complementary_verif is None else complementary_verif
+        if not isinstance(complementary_verif, dict):
+            raise TypeError(
+                f"complementary_verif must be a dict or None. Got {type(complementary_verif)}."
+            )
+
+        log_ref = complementary_verif.get("logs", None)
+        log_rules = complementary_verif.get("log_rules", [])
+        judge_verif = complementary_verif.get("judge", None)
+
         log_verdict, log_reason = True, ""
-        if log_ref:
-            full_log, _ = self._get_logs(0)
+        log_rules_verdict, log_rules_reason = True, ""
+        if log_ref or log_rules:
+            full_log, stage_log = self._get_logs(0)
             if log_ref == ['empty']:
                 if len(full_log) != 0:
                     log_verdict, log_reason = False, f"Log should be empty but got {len(full_log)} element"
-            else:
-            # print(log_ref)
-            # print("VS")
-            # print("FULL : ", [l.to_string() for l in full_log])
-                stage_log = full_log[-len(log_ref):]
-                # print("STAGE : ", [l.to_string() for l in stage_log])
-                log_verdict, log_reason = self._recursive_verif_log(log_ref, stage_log)
+            elif log_ref:
+                # print(log_ref)
+                # print("VS")
+                # print("FULL : ", [l.to_string() for l in full_log])
+                exact_stage_log = full_log[-len(log_ref):]
+                # print("STAGE : ", [l.to_string() for l in exact_stage_log])
+                log_verdict, log_reason = self._recursive_verif_log(log_ref, exact_stage_log)
                 # print(log_verdict)
                 # print(log_reason)
-                # print("=========")            
+                # print("=========")
+
+            if log_rules:
+                # Benchmark log rules intentionally run on the full log so one
+                # rule can span multiple benchmark stages when needed.
+                log_rules_verdict, log_rules_reason = self._verif_log_rules(log_rules, full_log)
 
         if judge_verif:
             if self.randomized:
@@ -185,16 +214,21 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             judge_dict = {"verdict": True, "explanation":""}
 
         explanation_parts = []
-        judge_explanation = judge_dict.get("explanation", "").strip()
-        if judge_explanation:
-            explanation_parts.append(judge_explanation)
 
         log_reason = log_reason.strip()
         if log_reason:
             explanation_parts.append(log_reason)
 
+        log_rules_reason = log_rules_reason.strip()
+        if log_rules_reason:
+            explanation_parts.append(log_rules_reason)
+
+        judge_explanation = judge_dict.get("explanation", "").strip()
+        if judge_explanation:
+            explanation_parts.append(judge_explanation)
+
         return {
-            "verdict" : judge_dict.get("verdict",True) and log_verdict,
+            "verdict" : judge_dict.get("verdict",True) and log_verdict and log_rules_verdict,
             "explanation" : " - ".join(explanation_parts)
         }
 

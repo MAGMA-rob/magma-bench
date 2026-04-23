@@ -1,9 +1,14 @@
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from magma_core.base.data_structures import ActiveStageErrorState
 from magma_core.base.goals import BaseGoal
 from magma_scenarios.benchmark import KNOWN_CRITERIA
-from ..evalutations.predicate import compile_predicates_to_goals, get_obs_entity_signature
+from ..evalutations.log_rules import compile_log_rules
+from ..evalutations.predicate import (
+    compile_predicates_to_goals,
+    get_obs_entity_signature,
+    validate_predicate_specs,
+)
 from .stage_injection import StageInjection
 
 
@@ -37,7 +42,7 @@ class Stage:
     _predicate_signature: Optional[Tuple[str, ...]]
 
     _should_reset_env: bool
-    _comp_eval: Dict
+    _comp_eval: Dict[str, Any]
 
     def __new__(cls, inputs: Dict, id: str):
         if cls is Stage:
@@ -216,6 +221,44 @@ class Stage:
 
         return normalized
 
+    def _parse_complementary_verif(self, raw: Any) -> Dict[str, Any]:
+        if raw is None:
+            return {}
+        if not isinstance(raw, dict):
+            raise TypeError(f"complementary_verif must be a dict. Got {type(raw)}.")
+
+        extra_keys = set(raw) - {"logs", "judge", "log_rules"}
+        if extra_keys:
+            raise TypeError(
+                "complementary_verif only supports keys ['judge', 'log_rules', 'logs']. "
+                f"Got unexpected keys {sorted(extra_keys)}."
+            )
+
+        out: Dict[str, Any] = {}
+        if "logs" in raw:
+            out["logs"] = raw["logs"]
+
+        if "judge" in raw:
+            judge = raw["judge"]
+            if not isinstance(judge, str):
+                raise TypeError(f"complementary_verif['judge'] must be a str. Got {type(judge)}.")
+            out["judge"] = judge
+
+        if "log_rules" in raw:
+            log_rules = raw["log_rules"]
+            if not isinstance(log_rules, list):
+                raise TypeError(
+                    f"complementary_verif['log_rules'] must be a list. Got {type(log_rules)}."
+                )
+            out["log_rules"] = compile_log_rules(log_rules)
+
+        return out
+
+    def _has_log_verification(self) -> bool:
+        if self._comp_eval.get("logs", None) not in (None, []):
+            return True
+        return len(self._comp_eval.get("log_rules", [])) > 0
+
     def _validate_injections(self):
         """
         Validate stage-level injection constraints and mirror legacy flags for
@@ -240,7 +283,7 @@ class Stage:
         force_injections = recovery_injections + failure_injections
         if force_injections and (
             self.expected_behavior != "act"
-            or (not self._has_action_goals() and self._comp_eval.get("logs", []) == [])
+            or (not self._has_action_goals() and not self._has_log_verification())
         ):
             raise TypeError(
                 "A stage can not define force_recovery/force_failure injections while "
@@ -253,7 +296,7 @@ class Stage:
                 "with answer_to_user/flag_answer_to_user."
             )
 
-        if failure_injections and not self._has_action_goals() and self._comp_eval.get("logs", []) == []:
+        if failure_injections and not self._has_action_goals() and not self._has_log_verification():
             raise TypeError(
                 "A stage marked as force_failure must define either an action_goal or a log eval."
             )
@@ -372,8 +415,8 @@ class AnswerStage(Stage):
         )
         self.instruction = self._build_explicit_instruction(inputs)
         self.max_agents_step = self._get_positive_max_step(inputs, default=1)
-        self._comp_eval = inputs.get("complementary_verif", {})
-        if not isinstance(self._comp_eval, dict) or self._comp_eval == {}:
+        self._comp_eval = self._parse_complementary_verif(inputs.get("complementary_verif", {}))
+        if self._comp_eval == {}:
             raise TypeError(
                 "A stage with expected_behavior='answer' must define a non-empty "
                 "dict in complementary_verif."
@@ -390,6 +433,7 @@ class ActStage(Stage):
         for i, predicate in enumerate(predicates):
             if not isinstance(predicate, dict):
                 raise TypeError(f"action_goal[{i}] must be a dict. Got {type(predicate)}.")
+        validate_predicate_specs(predicates)
         return predicates
 
     def __init__(self, inputs: Dict, id: str) -> None:
@@ -398,7 +442,7 @@ class ActStage(Stage):
         self._init_act_instruction(inputs)
         self.max_agents_step = self._get_positive_max_step(inputs)
         self._predicate_specs = self._parse_predicate_specs(inputs.get("action_goal", []))
-        self._comp_eval = inputs.get("complementary_verif", {})
+        self._comp_eval = self._parse_complementary_verif(inputs.get("complementary_verif", {}))
         self.answer_user = inputs.get("answer_to_user", False) or inputs.get("flag_answer_to_user", False)
         self.injections = self._parse_injections(inputs)
         self._validate_injections()
