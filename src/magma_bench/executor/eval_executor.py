@@ -383,6 +383,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             if env_infos.all_finished():
 
                 results, mess, att_modif = env_infos.build_return()
+                error_flags = env_infos.get_error_flags()
                 
                 # Detect planning error
                 planning_error = []
@@ -397,6 +398,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                     "reason":mess,
                     "att_modif" : att_modif,
                     "planning_error":planning_error,
+                    "runtime_error_triggered": any(flag == "injection_error" for flag in error_flags),
                     "error_description": env_infos.get_error_descriptions(),
                 }
                 env_infos.tool_robots = []

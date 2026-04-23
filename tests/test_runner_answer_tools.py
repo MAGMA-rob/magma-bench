@@ -205,6 +205,25 @@ class FakeFailingScenario(FakeScenario):
         return False, "judge failed"
 
 
+class FakeRuntimeErrorScenario(FakeScenario):
+    def execute_env_step(self):
+        self._turn += 1
+        if self._turn == 1:
+            return (
+                {
+                    0: {
+                        "planning_error": [False],
+                        "success": [False],
+                        "reason": ["runtime error"],
+                        "att_modif": [],
+                        "runtime_error_triggered": True,
+                    }
+                },
+                {"obs": "after_runtime_error"},
+            )
+        return {}, {"obs": f"turn_{self._turn}"}
+
+
 def _make_runner(responses):
     runner = BenchmarkRunner.__new__(BenchmarkRunner)
     runner.system = FakeSystem(responses)
@@ -281,6 +300,41 @@ def test_answer_stage_with_tools_does_not_call_judge_before_final_answer():
         "user",
         "MODEL",
         "SYSTEM",
+    ]
+
+
+def test_runtime_error_tool_failure_does_not_consume_agent_step_budget():
+    runner = _make_runner(
+        [
+            {
+                "say": "Je tente l'action.",
+                "action": {"name": "lookup_stock", "arguments": {"item": "box_a"}},
+            },
+            {
+                "say": "L'outil a echoue a cause de l'erreur injectee.",
+                "action": {},
+            },
+        ]
+    )
+    scenario = FakeRuntimeErrorScenario()
+    stage = FakeAnswerStage(max_agents_step=1)
+
+    result = runner._run_stage(
+        scenario,
+        stage,
+        task_attributes={},
+        instruction={"author": "user", "content": "Essaie puis explique."},
+    )
+
+    assert result.success is True
+    assert result.explanation == "judge ok"
+    assert len(scenario.evaluate_calls) == 1
+    assert scenario.evaluate_calls[0][1]["say"] == "L'outil a echoue a cause de l'erreur injectee."
+    assert [message["author"] for message in result.conversation] == [
+        "user",
+        "MODEL",
+        "SYSTEM",
+        "MODEL",
     ]
 
 

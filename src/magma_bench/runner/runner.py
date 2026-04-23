@@ -36,6 +36,17 @@ class BenchmarkRunner():
 
     #_bench_logs : List = []
 
+    @staticmethod
+    def _ensure_empty_or_create_output_dir(output_path: str) -> None:
+        if os.path.exists(output_path):
+            if not os.path.isdir(output_path):
+                raise FileExistsError(f"Benchmark output path exists and is not a directory: {output_path}")
+            if any(os.scandir(output_path)):
+                raise FileExistsError(f"Benchmark output directory already exists and is not empty: {output_path}")
+            return
+
+        os.makedirs(output_path, exist_ok=True)
+
     def __init__(
             self,
             system_class_name : str,
@@ -62,6 +73,7 @@ class BenchmarkRunner():
 
         self.benchmarks = []
         self.output_path = os.path.join(benchmark_config["save_dir"],self.system.system_name, datetime.now().strftime("%m-%d_%H-%M"))
+        self._ensure_empty_or_create_output_dir(self.output_path)
 
         self.per_task_log = benchmark_config["logs"]
         print(self.per_task_log)
@@ -106,6 +118,7 @@ class BenchmarkRunner():
         step_counter = 0
         end_of_action = False # is action terminated ?
         catastrophic = False
+        budget = 4 # store the nb of injection error free recovery remaining
 
     def _make_answer(self, author: str, content: Dict, timestep = 0):
         """Return a json formated answer."""
@@ -210,6 +223,9 @@ class BenchmarkRunner():
                 # build the status 
                 status_dict = build_model_return_from_executor(call_action, tools_ended[0]['success'], tools_ended[0]['reason'])
                 stageResult.executions_result.extend(tools_ended[0]['success'])
+                if stageCounters.budget > 0 and tools_ended[0].get("runtime_error_triggered", False) and any(not success for success in tools_ended[0]['success']):
+                    stageCounters.step_counter -= 1
+                    stageCounters.budget -= 1
 
                 # update stage attributes
                 if not should_recover and not stage.has_flag_failure():
