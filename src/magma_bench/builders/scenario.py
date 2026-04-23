@@ -126,10 +126,14 @@ class Scenario():
                 reason+="Predicate fails. "
 
         if success and complementary_verif: #no need to check this if predicates fails
-            log_ref = complementary_verif.get("logs",None)
-            judge = complementary_verif.get("judge", None) if do_judge else None
+            effective_complementary_verif = complementary_verif.copy()
+            if not do_judge and "judge" in complementary_verif:
+                effective_complementary_verif.pop("judge", None)
 
-            out_dict = self.tool_executor.verif_complementary_bench(model_say, log_ref, judge)
+            out_dict = self.tool_executor.verif_complementary_bench(
+                model_say,
+                effective_complementary_verif,
+            )
             if not out_dict['verdict']: success = False
             reason += out_dict["explanation"]
 

@@ -36,6 +36,17 @@ class BenchmarkRunner():
 
     #_bench_logs : List = []
 
+    @staticmethod
+    def _ensure_empty_or_create_output_dir(output_path: str) -> None:
+        if os.path.exists(output_path):
+            if not os.path.isdir(output_path):
+                raise FileExistsError(f"Benchmark output path exists and is not a directory: {output_path}")
+            if any(os.scandir(output_path)):
+                raise FileExistsError(f"Benchmark output directory already exists and is not empty: {output_path}")
+            return
+
+        os.makedirs(output_path, exist_ok=True)
+
     def __init__(
             self,
             system_class_name : str,
@@ -62,6 +73,7 @@ class BenchmarkRunner():
 
         self.benchmarks = []
         self.output_path = os.path.join(benchmark_config["save_dir"],self.system.system_name, datetime.now().strftime("%m-%d_%H-%M"))
+        self._ensure_empty_or_create_output_dir(self.output_path)
 
         self.per_task_log = benchmark_config["logs"]
         print(self.per_task_log)
@@ -79,8 +91,13 @@ class BenchmarkRunner():
         if self._skip_backends:
             original_verif = self.tool_executor.verif_complementary_bench
 
-            def _verif_without_judge(model_say: str, log_ref, judge_verif):
-                return original_verif(model_say, log_ref, None)
+            def _verif_without_judge(model_say: str, complementary_verif):
+                if complementary_verif is None:
+                    return original_verif(model_say, None)
+
+                effective_complementary_verif = dict(complementary_verif)
+                effective_complementary_verif.pop("judge", None)
+                return original_verif(model_say, effective_complementary_verif)
 
             self.tool_executor.verif_complementary_bench = _verif_without_judge
     
@@ -101,6 +118,7 @@ class BenchmarkRunner():
         step_counter = 0
         end_of_action = False # is action terminated ?
         catastrophic = False
+        budget = 4 # store the nb of injection error free recovery remaining
 
     def _make_answer(self, author: str, content: Dict, timestep = 0):
         """Return a json formated answer."""
@@ -205,6 +223,9 @@ class BenchmarkRunner():
                 # build the status 
                 status_dict = build_model_return_from_executor(call_action, tools_ended[0]['success'], tools_ended[0]['reason'])
                 stageResult.executions_result.extend(tools_ended[0]['success'])
+                if stageCounters.budget > 0 and tools_ended[0].get("runtime_error_triggered", False) and any(not success for success in tools_ended[0]['success']):
+                    stageCounters.step_counter -= 1
+                    stageCounters.budget -= 1
 
                 # update stage attributes
                 if not should_recover and not stage.has_flag_failure():
@@ -277,10 +298,12 @@ class BenchmarkRunner():
                 # if no tools where called, check model text response
                 elif stage.has_flag_failure() and not should_recover:
                     d = self.tool_executor.verif_complementary_bench(
-                        response_dict['say'], None, 
-                        f"The model must inform the user that an error happens" 
+                        response_dict['say'],
+                        {
+                            "judge": f"The model must inform the user that an error happens"
+                        }
                         #this error happens : {stage.force_failure}. It is not strict, the model can just inform of the failure state."
-                        )     
+                        )
                     stageResult.success, stageResult.explanation = d['verdict'], d['explanation']
 
                 fail_fast_on_verification_failure = (
@@ -299,6 +322,7 @@ class BenchmarkRunner():
                         answer = self._make_answer("MODEL", response_dict)
                         stageResult.conversation.append(answer)
                         stageResult.success = (response_dict['action'] == {})
+                        if not stageResult.success: stageResult.explanation = "Add a call on the final answer."
                     end_of_loop = True
                 else:
                     if fail_fast_on_verification_failure or stageCounters.step_counter >= stage.max_agents_step:

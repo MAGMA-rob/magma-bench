@@ -117,6 +117,7 @@ class FakeSystem:
 class FakeAnswerStage:
     def __init__(self, max_agents_step):
         self.max_agents_step = max_agents_step
+        self.expected_behavior = "answer"
 
     def get_error_state(self):
         return {}
@@ -144,6 +145,7 @@ class FakeTextOnlyStage:
     def __init__(self, max_agents_step, is_answer=False):
         self.max_agents_step = max_agents_step
         self._is_answer = is_answer
+        self.expected_behavior = "answer" if is_answer else "acknowledge"
 
     def get_error_state(self):
         return {}
@@ -192,20 +194,40 @@ class FakeScenario:
             )
         return {}, {"obs": f"turn_{self._turn}"}
 
-    def evaluate_stage(self, stage, model_response, obs):
-        self.evaluate_calls.append((stage, model_response, obs))
+    def evaluate_stage(self, stage, model_response, obs, do_judge):
+        self.evaluate_calls.append((stage, model_response, obs, do_judge))
         return True, "judge ok"
 
 
 class FakeFailingScenario(FakeScenario):
-    def evaluate_stage(self, stage, model_response, obs):
-        self.evaluate_calls.append((stage, model_response, obs))
+    def evaluate_stage(self, stage, model_response, obs, do_judge):
+        self.evaluate_calls.append((stage, model_response, obs, do_judge))
         return False, "judge failed"
+
+
+class FakeRuntimeErrorScenario(FakeScenario):
+    def execute_env_step(self):
+        self._turn += 1
+        if self._turn == 1:
+            return (
+                {
+                    0: {
+                        "planning_error": [False],
+                        "success": [False],
+                        "reason": ["runtime error"],
+                        "att_modif": [],
+                        "runtime_error_triggered": True,
+                    }
+                },
+                {"obs": "after_runtime_error"},
+            )
+        return {}, {"obs": f"turn_{self._turn}"}
 
 
 def _make_runner(responses):
     runner = BenchmarkRunner.__new__(BenchmarkRunner)
     runner.system = FakeSystem(responses)
+    runner._skip_backends = False
     runner.tool_executor = SimpleNamespace(
         ask_for_retry=lambda *_args, **_kwargs: None,
         verif_complementary_bench=lambda *_args, **_kwargs: {
@@ -278,6 +300,41 @@ def test_answer_stage_with_tools_does_not_call_judge_before_final_answer():
         "user",
         "MODEL",
         "SYSTEM",
+    ]
+
+
+def test_runtime_error_tool_failure_does_not_consume_agent_step_budget():
+    runner = _make_runner(
+        [
+            {
+                "say": "Je tente l'action.",
+                "action": {"name": "lookup_stock", "arguments": {"item": "box_a"}},
+            },
+            {
+                "say": "L'outil a echoue a cause de l'erreur injectee.",
+                "action": {},
+            },
+        ]
+    )
+    scenario = FakeRuntimeErrorScenario()
+    stage = FakeAnswerStage(max_agents_step=1)
+
+    result = runner._run_stage(
+        scenario,
+        stage,
+        task_attributes={},
+        instruction={"author": "user", "content": "Essaie puis explique."},
+    )
+
+    assert result.success is True
+    assert result.explanation == "judge ok"
+    assert len(scenario.evaluate_calls) == 1
+    assert scenario.evaluate_calls[0][1]["say"] == "L'outil a echoue a cause de l'erreur injectee."
+    assert [message["author"] for message in result.conversation] == [
+        "user",
+        "MODEL",
+        "SYSTEM",
+        "MODEL",
     ]
 
 
@@ -493,11 +550,11 @@ def test_runner_init_can_skip_backends_for_magma_single(monkeypatch):
         def __init__(self, _planner_endpoint, worker, nb_env=1, randomize_variation=0):
             state["executor_worker"] = worker
 
-        def verif_complementary_bench(self, model_say, log_ref, judge_verif):
-            state["judge_calls"].append((model_say, log_ref, judge_verif))
+        def verif_complementary_bench(self, model_say, complementary_verif):
+            state["judge_calls"].append((model_say, complementary_verif))
             return {
                 "verdict": True,
-                "explanation": f"log_ref={log_ref}, judge_verif={judge_verif}",
+                "explanation": f"complementary_verif={complementary_verif}",
             }
 
     monkeypatch.setattr(runner_module, "load_module_from_name", lambda *_args, **_kwargs: FakeSystemClass)
@@ -523,16 +580,18 @@ def test_runner_init_can_skip_backends_for_magma_single(monkeypatch):
     runner = BenchmarkRunner("MagmaSingle", config, class_specific_args={}, skip_backends=True)
     out = runner.tool_executor.verif_complementary_bench(
         "final answer",
-        [{"action": "demo"}],
-        "must be checked by judge",
+        {
+            "logs": [{"action": "demo"}],
+            "judge": "must be checked by judge",
+        },
     )
 
     assert state["lmworker_calls"] == []
     assert state["executor_worker"] is None
     assert state["system_kwargs"] == {"agent_url": "http://agent"}
-    assert state["judge_calls"] == [("final answer", [{"action": "demo"}], None)]
+    assert state["judge_calls"] == [("final answer", {"logs": [{"action": "demo"}]})]
     assert out["verdict"] is True
-    assert "judge_verif=None" in out["explanation"]
+    assert "complementary_verif={'logs': [{'action': 'demo'}]}" in out["explanation"]
 
 
 def test_runner_init_rejects_skip_backends_for_non_magma_single():
