@@ -76,7 +76,6 @@ class BenchmarkRunner():
         self._ensure_empty_or_create_output_dir(self.output_path)
 
         self.per_task_log = benchmark_config["logs"]
-        print(self.per_task_log)
         self.result_manager = ResultManager(self.output_path, benchmark_config["logs"], benchmark_config["num_eval"]==1)
         worker = None if self._skip_backends else LMWorker(verifier_backend)
 
