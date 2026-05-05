@@ -5,12 +5,13 @@ from typing import Dict, List, Union, Optional, Tuple, Any
 from collections import OrderedDict
 from dataclasses import dataclass
 from magma_core.base.tasks.base_task import BaseTask
+import copy
 import torch, json
 from mani_skill.utils.wrappers.record import RecordEpisode
 
 from magma_core.base.envs import DefaultEnv
 from magma_core.base.executor import ToolsBaseExecutor
-from magma_core.base.data_structures import ToolInfos, Log, ActiveStageErrorState
+from magma_core.base.data_structures import ToolInfos, Log, ActiveStageErrorState, ToolErrorFlag
 from magma_core.workers import LMWorker
 from magma_core.protocol.payload.user_sim_payload import JudgePayload
 from magma_core.utils.global_utils import (
@@ -55,6 +56,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
 
         self._eval_envs : Dict[int,ToolInfos] = {}
         self._precedent_env_state = {}
+        self._task_env_options_override: Dict[str, Any] = {}
    
     ################ public function
 
@@ -62,7 +64,21 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
         if self.randomized:
             self.randomizer.set_variation_index(id)
 
+    def set_task_env_options(self, env_options: Optional[Dict[str, Any]]) -> None:
+        if env_options is None:
+            self._task_env_options_override = {}
+            return
+        if not isinstance(env_options, dict):
+            raise TypeError(f"Task env_options must be a dict. Got {type(env_options)}.")
+        self._task_env_options_override = copy.deepcopy(env_options)
+
+    def get_env_options(self, stage_id: Optional[int] = None) -> Dict:
+        env_options = copy.deepcopy(super().get_env_options(stage_id))
+        env_options.update(copy.deepcopy(self._task_env_options_override))
+        return env_options
+
     def initialize(self, task_ref: BaseTask, build_first_stage: bool = True, obs_mode: str = "state_dict", video_path : str = "none") -> DefaultEnv:
+        self.set_task_env_options(None)
         self.env = super().initialize(task_ref, build_first_stage, obs_mode)
         if video_path != "none":
             self.env = RecordEpisode(
@@ -167,7 +183,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             raise TypeError(
                 f"complementary_verif must be a dict or None. Got {type(complementary_verif)}."
             )
-
+        
         log_ref = complementary_verif.get("logs", None)
         log_rules = complementary_verif.get("log_rules", [])
         judge_verif = complementary_verif.get("judge", None)
@@ -384,20 +400,13 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
 
                 results, mess, att_modif = env_infos.build_return()
                 error_flags = env_infos.get_error_flags()
-                
-                # Detect planning error
-                planning_error = []
-                for i, r in enumerate(results):
-                    if not r and env_infos.tool_robots[i].get_result() is not None:
-                        planning_error.append(True)
-                    else:
-                        planning_error.append(False)
+        
 
                 out[env_infos.node_id] = {
                     'success':results,
                     "reason":mess,
                     "att_modif" : att_modif,
-                    "planning_error":planning_error,
+                    "planning_error": [e == ToolErrorFlag.PLANNER_ERROR for e in error_flags],
                     "runtime_error_triggered": any(flag == "injection_error" for flag in error_flags),
                     "error_description": env_infos.get_error_descriptions(),
                 }

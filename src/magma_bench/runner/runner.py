@@ -76,7 +76,6 @@ class BenchmarkRunner():
         self._ensure_empty_or_create_output_dir(self.output_path)
 
         self.per_task_log = benchmark_config["logs"]
-        print(self.per_task_log)
         self.result_manager = ResultManager(self.output_path, benchmark_config["logs"], benchmark_config["num_eval"]==1)
         worker = None if self._skip_backends else LMWorker(verifier_backend)
 
@@ -105,7 +104,7 @@ class BenchmarkRunner():
         """Load one benchmark to evaluate the system on"""
         if criteria == None or criteria == ['all']:
             criteria = 'all'
-        if scenario == None:
+        if scenario == None or scenario == ['all']:
             scenario = 'all'
         self._benchmark_configs = BenchmarkLoader.load(criteria, scenario)
 
@@ -123,6 +122,25 @@ class BenchmarkRunner():
     def _make_answer(self, author: str, content: Dict, timestep = 0):
         """Return a json formated answer."""
         return {'author':author, "content": copy.deepcopy(content), "timestamp":timestep}
+
+    def _build_planning_retry_exceeded_reason(self, call_action: Dict, status_dict: Dict) -> str:
+        action_name = call_action.get("name")
+        if action_name is None and call_action:
+            action_name = ", ".join(
+                f"{robot}:{action.get('name', 'unknown')}"
+                for robot, action in call_action.items()
+                if isinstance(action, dict)
+            )
+        if not action_name:
+            action_name = "unknown"
+
+        executor_message = status_dict.get("error") or status_dict.get("infos") or ""
+        if executor_message:
+            return (
+                f"Exceeded 10 planning retries while executing '{action_name}'. "
+                f"Last executor status: {executor_message}"
+            )
+        return f"Exceeded 10 planning retries while executing '{action_name}'."
 
     def _get_last_status_instruction(self, conversation: List[Dict]) -> Union[Dict, None]:
         """
@@ -213,9 +231,18 @@ class BenchmarkRunner():
                     # We got a planning error here. We retry the same function
                     self.tool_executor.ask_for_retry([0], stageCounters.planner_error_count % 3 == 0, error_state)
                     if stageCounters.planner_error_count > 10:
+                        status_dict = build_model_return_from_executor(
+                            call_action,
+                            tools_ended[0]['success'],
+                            tools_ended[0]['reason'],
+                        )
+                        stageResult.conversation.append(self._make_answer("SYSTEM", status_dict))
                         stageResult.executions_result.append(True)
                         stageResult.success = False
-                        stageResult.explanation = "The planning failed 10 times. The call is probably not good."
+                        stageResult.explanation = self._build_planning_retry_exceeded_reason(
+                            call_action,
+                            status_dict,
+                        )
                         return stageResult
                     tools_ended = {}
                     continue

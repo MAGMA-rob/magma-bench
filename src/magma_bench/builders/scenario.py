@@ -148,10 +148,12 @@ class Scenario():
         + reset env and tool_executor
         """
         if not self.env: raise ValueError("Env not initialized")
+        task = self.tasks[idx]
+        self.tool_executor.set_task_env_options(getattr(task, "env_options", {}))
         self.env.reset(seed=self.seed,options=self.tool_executor.get_env_options(0))
         self.tool_executor.log_reset() #reset log at each new tasks
         self.tool_executor.task_ref.reset_stage() #Allows to reset the attributes properly (in case of modification)
-        return self.tasks[idx]
+        return task
     
     def get_init_elements(self):
         """Return a dict containing different init ellement such as tools and attributes."""

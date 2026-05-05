@@ -290,9 +290,9 @@ class Stage:
                 "not expecting an action or while missing predicates/log verifications."
             )
 
-        if force_injections and self.answer_user:
+        if failure_injections and self.answer_user:
             raise TypeError(
-                "A stage can not define force_recovery/force_failure injections together "
+                "A stage can not define force_failure injections together "
                 "with answer_to_user/flag_answer_to_user."
             )
 

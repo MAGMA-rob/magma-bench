@@ -130,21 +130,50 @@ class RequiresBeforeLogRule(BaseLogRule):
         )
 
     def verify(self, logs: List[Log]) -> Tuple[bool, str]:
-        found = False
-        for event_idx, event_log in enumerate(logs):
-            if not log_matches(event_log, self.event):
-                continue
-            found = True
+        event_indices = [
+            event_idx
+            for event_idx, event_log in enumerate(logs)
+            if log_matches(event_log, self.event)
+        ]
+        if not event_indices:
+            return False, "No coffee launched yet"
 
-            for matcher in self.required_before:
-                if any(log_matches(previous_log, matcher) for previous_log in logs[:event_idx]):
-                    continue
+        event_idx = event_indices[-1]
+        previous_event_idx = event_indices[-2] if len(event_indices) > 1 else -1
+        # A retry press can reuse earlier setup, but new setup calls between two
+        # presses must not contradict the requirement for the latest press.
+        event_segment = logs[previous_event_idx + 1:event_idx]
+
+        for matcher in self.required_before:
+            if not any(log_matches(previous_log, matcher) for previous_log in logs[:event_idx]):
                 return (
                     False,
                     f"Log rule 'requires_before' expected {matcher} before "
                     f"{self.event} at stage log index {event_idx}.",
                 )
-        if not found: return False, "No coffee launched yet"
+
+            function_name = matcher.get("function_name")
+            if function_name is None:
+                continue
+
+            same_function_logs = [
+                (log_idx, log)
+                for log_idx, log in enumerate(event_segment, start=previous_event_idx + 1)
+                if log.function == function_name
+            ]
+            if len(same_function_logs) > 1:
+                return (
+                    False,
+                    f"Log rule 'requires_before' expected a single {function_name} "
+                    f"before {self.event} at stage log index {event_idx}.",
+                )
+            if same_function_logs and not log_matches(same_function_logs[0][1], matcher):
+                return (
+                    False,
+                    f"Log rule 'requires_before' expected {matcher} before "
+                    f"{self.event}, but found another {function_name} at stage log "
+                    f"index {same_function_logs[0][0]}.",
+                )
         return True, ""
 
 
