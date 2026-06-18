@@ -28,6 +28,13 @@ LENGTH_GROUPS = {
     "10-16": (10, 16),
 }
 
+# Edit these lists to define the aggregate subsets generated automatically.
+SCENARIO_GROUPS = {
+    "recovery": ["R_C", "R_CS"],
+    "ood": ["Packaging_v1", "US_C", "COMP_Laundry"],
+    "id": ["ID_CS", "ID_MC", "ID_WS","R_C","R_CS"],
+}
+
 TRY_DIR_RE = re.compile(r"^try-(\d+)$")
 SECONDARY_RE = re.compile(r"^\s*(\d+)\s*/\s*(\d+)\s*$")
 
@@ -455,6 +462,7 @@ def rebuild_run(
     selection: ScenarioSelection,
     output_name: str,
     write_scenario_results: bool,
+    subset_metadata: Optional[Mapping[str, Any]] = None,
 ) -> RebuildReport:
     report = RebuildReport(run_dir=run_dir)
     if not run_dir.exists():
@@ -518,6 +526,16 @@ def rebuild_run(
         extra_counts={"scenario_count": len(scenario_payloads)}
     )
     benchmark_payload["scenarios"] = scenario_payloads
+
+    if subset_metadata is not None:
+        benchmark_payload = {
+            "subset": {
+                **dict(subset_metadata),
+                "selected_scenarios": list(report.selected_scenarios),
+            },
+            **benchmark_payload,
+        }
+
     report.aggregate_payload = benchmark_payload
 
     result_path = run_dir / output_name
@@ -810,6 +828,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
             "for unfiltered generic rebuilds."
         ),
     )
+    parser.add_argument(
+        "--no-groups",
+        action="store_true",
+        help=(
+            "Do not write predefined aggregate subsets. By default the script also "
+            "writes result_recovery.json, result_ood.json and result_id.json."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -843,6 +869,28 @@ def main(argv: Optional[List[str]] = None) -> int:
         print_report(report, dry_run=args.dry_run)
         if report.skipped_tries:
             exit_code = 1
+
+        if args.no_groups:
+            continue
+
+        for group_name, scenario_ids in SCENARIO_GROUPS.items():
+            group_report = rebuild_run(
+                eval_path,
+                catalog,
+                dry_run=args.dry_run,
+                write_rebuilt_try_scores=not args.no_write_rebuilt_try_scores,
+                overwrite_try_scores=args.overwrite_try_scores,
+                selection=ScenarioSelection(include=scenario_ids),
+                output_name=f"result_{group_name}.json",
+                write_scenario_results=False,
+                subset_metadata={
+                    "name": group_name,
+                    "configured_scenarios": scenario_ids,
+                },
+            )
+            print_report(group_report, dry_run=args.dry_run)
+            if group_report.skipped_tries:
+                exit_code = 1
     return exit_code
 
 
