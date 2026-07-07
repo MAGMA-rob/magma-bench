@@ -1,7 +1,5 @@
-from pygments.token import String
 from dataclasses import dataclass
-import magma_bench.system as system_pkg
-from magma_bench.system import System
+from magma_bench.agents import BenchmarkAgent, get_agent_mode
 from magma_bench.builders import (
     ScenarioConfig, Scenario, 
     BenchmarkLoader, ScenarioBuilder,
@@ -13,7 +11,6 @@ from magma_bench.executor import ToolsEvalExecutor
 from magma_core.configs.config import MAGMAConfig
 from magma_core.utils.data_utils import apply_att_modif
 from magma_core.utils.text_utils import build_model_return_from_executor, build_fake_execution_fail
-from magma_core.utils.global_utils import load_module_from_name
 from magma_core.workers import LMWorker
 
 from typing import Dict, List, Type, Union
@@ -23,11 +20,11 @@ from datetime import datetime
 
 class BenchmarkRunner():
     """
-    Main class of the benchmark. Allows to initialize and runs evaluation on multiple benchmark for a given system
+    Main class of the benchmark. Allows to initialize and run evaluations for a benchmark agent.
     """
 
-    # reference to the system to evaluate
-    system : System
+    # reference to the agent to evaluate
+    agent : BenchmarkAgent
 
     _benchmark_configs : List[ScenarioConfig]
 
@@ -49,19 +46,18 @@ class BenchmarkRunner():
 
     def __init__(
             self,
-            system_class_name : str,
+            agent_mode_name : str,
             magma_config : MAGMAConfig,
             class_specific_args : Dict,
             skip_backends: bool = False,
         ) -> None:
         benchmark_config = magma_config.benchmark
         self._skip_backends = skip_backends
-        if self._skip_backends and system_class_name != "MagmaSingle":
-            raise ValueError("skip_backends=True is only supported with MagmaSingle.")
+        if self._skip_backends and agent_mode_name != "task_state_reactive":
+            raise ValueError("skip_backends=True is only supported with task_state_reactive.")
 
-        System_class : Type[System] = load_module_from_name(system_pkg, system_class_name)
-        if "Magma" in system_class_name:
-            class_specific_args["agent_url"] = magma_config.magma_agent_address
+        Agent_class : Type[BenchmarkAgent] = get_agent_mode(agent_mode_name).load_agent_class()
+        class_specific_args.setdefault("agent_url", magma_config.magma_agent_address)
 
         verifier_backend = None
         if not self._skip_backends:
@@ -69,10 +65,10 @@ class BenchmarkRunner():
             class_specific_args.setdefault("backend_url",verifier_backend.endpoint) # TO DO: Dedicated option
             class_specific_args.setdefault("backend_header",verifier_backend.headers) # TO DO: Dedicated option
 
-        self.system = System_class(**class_specific_args)
+        self.agent = Agent_class(**class_specific_args)
 
         self.benchmarks = []
-        self.output_path = os.path.join(benchmark_config["save_dir"],self.system.system_name, datetime.now().strftime("%m-%d_%H-%M"))
+        self.output_path = os.path.join(benchmark_config["save_dir"],self.agent.agent_name, datetime.now().strftime("%m-%d_%H-%M"))
         self._ensure_empty_or_create_output_dir(self.output_path)
 
         self.per_task_log = benchmark_config["logs"]
@@ -101,7 +97,7 @@ class BenchmarkRunner():
             self.tool_executor.verif_complementary_bench = _verif_without_judge
     
     def load_benchmark(self, criteria, scenario) -> bool:
-        """Load one benchmark to evaluate the system on"""
+        """Load one benchmark to evaluate the agent on."""
         if criteria == None or criteria == ['all']:
             criteria = 'all'
         if scenario == None or scenario == ['all']:
@@ -200,7 +196,7 @@ class BenchmarkRunner():
             if not stageCounters.is_running_a_tool:
                 stageCounters.step_counter+=1
                 # get model answer
-                response_dict = self.system.compute_answer(instruction, task_attributes)
+                response_dict = self.agent.compute_answer(instruction, task_attributes)
                 model_answer = self._make_answer("MODEL", response_dict)
                 stageResult.conversation.append(model_answer)
                         
@@ -345,7 +341,7 @@ class BenchmarkRunner():
                     # check if user got a valid answer
                     if stage.has_flag_answer_to_user():
                         # get model answer
-                        response_dict = self.system.compute_answer(instruction,task_attributes)
+                        response_dict = self.agent.compute_answer(instruction,task_attributes)
                         answer = self._make_answer("MODEL", response_dict)
                         stageResult.conversation.append(answer)
                         stageResult.success = (response_dict['action'] == {})
@@ -368,7 +364,7 @@ class BenchmarkRunner():
                 try_output_path = self.result_manager.get_try_output_path(scenario.id, try_number)
 
             # Select the indexed benchmark variation before collecting any
-            # try-level metadata or exposing tools/attributes to the system.
+            # try-level metadata or exposing tools/attributes to the agent.
             self.tool_executor.set_randomizer_index(try_index)
             scenario_result = ScenarioResult(
                 scenario.id,
@@ -377,10 +373,10 @@ class BenchmarkRunner():
                 randomization_info=self.tool_executor.get_try_randomization_info(),
             )
             init_elements = scenario.get_init_elements()
-            self.system.init_task(init_elements)
+            self.agent.init_task(init_elements)
             
             for task_id in tqdm(range(nb_tasks), desc="Task", position=2, leave=False):
-                self.system.reset_step()
+                self.agent.reset_step()
 
                 task : Task = scenario.get_task(task_id)
                 task_attributes = scenario.get_init_elements()["attributes"]
@@ -467,7 +463,7 @@ class BenchmarkRunner():
         if self._skip_metrics:
             return
         data = self.result_manager.compute_global_metrics()
-        data['system_info'] = self.system.get_system_card()
+        data['agent_info'] = self.agent.get_agent_card()
 
         path = os.path.join(self.output_path, "result.json")
         with open(path,"w+") as f:

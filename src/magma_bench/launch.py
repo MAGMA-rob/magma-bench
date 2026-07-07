@@ -8,7 +8,7 @@ from pathlib import Path
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("system", type=str, help="The system class name to evaluate. Must be inside magma_bench.system")
+    parser.add_argument("agent", type=str, help="Benchmark agent mode to evaluate.")
     
     group = parser.add_mutually_exclusive_group(required=True)
     possible_criteria = ["multi-steps", "c-reasoning", "lg-memorization", "all"]
@@ -59,7 +59,7 @@ def parse_args():
     return args
 
 def build_override_dict(args):
-    excluded = {"system", "criteria", "scenarios","extra"}
+    excluded = {"agent", "criteria", "scenarios","extra"}
     overrides = {"benchmark":{}}
 
     for key, value in vars(args).items():
@@ -103,7 +103,7 @@ def main(args : argparse.Namespace):
     magma_config.override_with_dict(override_dict)
 
     runner = BenchmarkRunner(
-        args.system, 
+        args.agent, 
         magma_config=magma_config,
         class_specific_args=args.extra
     )

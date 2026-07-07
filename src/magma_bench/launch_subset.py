@@ -17,10 +17,10 @@ def parse_args():
         help="Indices of the scenario tasks to execute.",
     )
     parser.add_argument(
-        "--system",
+        "--agent",
         type=str,
-        default="MagmaSingle",
-        help="System class name to evaluate. Default is MagmaSingle.",
+        default="task_state_reactive",
+        help="Benchmark agent mode to evaluate.",
     )
     parser.add_argument(
         "--config_path", "-c",
@@ -86,7 +86,7 @@ def main(args: argparse.Namespace):
     magma_config.override_with_dict(override_dict)
 
     runner = BenchmarkRunner(
-        args.system,
+        args.agent,
         magma_config=magma_config,
         class_specific_args=args.extra,
         skip_backends=args.skip_judge,
