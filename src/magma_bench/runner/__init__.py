@@ -1,1 +1,3 @@
-from .old_runner import BenchmarkRunner
+from .runner import BenchmarkRunner
+
+__all__ = ["BenchmarkRunner"]

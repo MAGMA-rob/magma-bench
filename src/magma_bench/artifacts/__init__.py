@@ -1,4 +1,3 @@
-from .loader import load_compiled_benchmark, load_compiled_episode
 from .models import (
     CONDITIONS,
     ActiveErrorSpec,
@@ -63,8 +62,6 @@ __all__ = [
     "deserialize_serialized_stage",
     "deserialize_stage",
     "deserialize_task_stages",
-    "load_compiled_benchmark",
-    "load_compiled_episode",
     "load_json_model",
     "serialize_error",
     "serialize_goal",

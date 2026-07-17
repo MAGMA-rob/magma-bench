@@ -10,6 +10,12 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("scenario", type=str, help="Scenario name to evaluate.")
     parser.add_argument(
+        "--benchmark_root",
+        type=str,
+        default=None,
+        help="Directory produced by magma-bench-build.",
+    )
+    parser.add_argument(
         "--task_indices",
         nargs="+",
         type=int,
@@ -91,11 +97,11 @@ def main(args: argparse.Namespace):
         class_specific_args=args.extra,
         skip_backends=args.skip_judge,
     )
-    runner.load_benchmark(None, [args.scenario])
+    runner.load_benchmark(getattr(args, "benchmark_root", None), [args.scenario])
 
-    if len(runner._benchmark_configs) != 1:
+    if len(runner._scenarios) != 1:
         raise ValueError(
-            f"Scenario selection must resolve to exactly one scenario. Got {len(runner._benchmark_configs)}."
+            f"Scenario selection must resolve to exactly one scenario. Got {len(runner._scenarios)}."
         )
 
     runner.run(args)

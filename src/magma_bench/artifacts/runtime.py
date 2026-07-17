@@ -1,3 +1,10 @@
+"""Conversion between persistent artifact schemas and executable MAGMA types.
+
+``models.py`` deliberately stays simulator-agnostic and JSON serializable.
+Functions here are the boundary that invokes MAGMA registries to reconstruct
+instructions, goals, errors and stages for validation or execution.
+"""
+
 from __future__ import annotations
 
 from typing import Iterable, List, Optional
@@ -27,10 +34,14 @@ from .models import (
 
 
 def serialize_goal(goal: BaseGoal) -> ObjectSpec:
+    """Convert a registered runtime goal into its persistent specification."""
+
     return ObjectSpec.model_validate(goal.to_spec())
 
 
 def deserialize_goal(spec: ObjectSpec) -> BaseGoal:
+    """Reconstruct a goal through the ``BaseGoal`` serialization registry."""
+
     return BaseGoal.from_spec(spec.model_dump(mode="python"))
 
 
@@ -38,6 +49,8 @@ def serialize_error(
     error: BaseError,
     runtime_arguments: Optional[dict] = None,
 ) -> ActiveErrorSpec:
+    """Persist an error definition and its episode-specific runtime settings."""
+
     error_spec = error.to_spec()
     return ActiveErrorSpec(
         error_type=error_spec["type"],
@@ -47,6 +60,8 @@ def serialize_error(
 
 
 def deserialize_error(spec: ActiveErrorSpec) -> BaseError:
+    """Reconstruct and validate an error before attaching it to a stage."""
+
     error = BaseError.from_spec({
         "type": spec.error_type,
         "arguments": spec.constructor_arguments,
@@ -56,6 +71,8 @@ def deserialize_error(spec: ActiveErrorSpec) -> BaseError:
 
 
 def stage_presentation(stage: BaseTaskStage) -> StagePresentationSpec:
+    """Capture the exact agent/verifier-facing presentation of a core stage."""
+
     stage_input = stage.get_stage_input()
     return StagePresentationSpec(
         stage_input=StageInputSpec(
@@ -71,6 +88,8 @@ def stage_presentation(stage: BaseTaskStage) -> StagePresentationSpec:
 
 
 def _expected_behavior(stage: BaseTaskStage) -> str:
+    """Resolve whether the agent must act, answer, or acknowledge the stage."""
+
     declared_behavior = getattr(stage, "expected_behavior", None)
     if declared_behavior is not None:
         if declared_behavior not in {"act", "answer", "acknowledge"}:
@@ -90,6 +109,8 @@ def apply_stage_presentation(
     stage: BaseTaskStage,
     presentation: StagePresentationSpec,
 ) -> None:
+    """Restore persisted presentation fields on a reconstructed core stage."""
+
     stage_input = presentation.stage_input
     instruction = Instruction.from_spec(
         stage_input.instruction.model_dump(mode="python")
@@ -104,7 +125,12 @@ def apply_stage_presentation(
 
 
 class DeclarativeStage(BaseTaskStage):
-    """Runtime stage for manually authored benchmark stages."""
+    """Executable counterpart of :class:`DeclarativeStageSpec`.
+
+    This adapter allows benchmark authors to assemble a stage from registered
+    goals, log rules and errors without creating a dedicated Python stage class.
+    It behaves like any other ``BaseTaskStage`` once reconstructed.
+    """
 
     target_tool_calls = 0
     max_tool_calls = 0
@@ -150,6 +176,8 @@ class DeclarativeStage(BaseTaskStage):
 
 
 def serialize_stage(stage: BaseTaskStage, stage_id: str) -> SerializedStageSpec:
+    """Serialize one registered Python stage without losing its presentation."""
+
     core_spec = stage.to_spec()
     return SerializedStageSpec(
         id=stage_id,
@@ -166,6 +194,12 @@ def deserialize_serialized_stage(
     *,
     validate_presentation: bool = False,
 ) -> BaseTaskStage:
+    """Rebuild a registered Python stage from a ``SerializedStageSpec``.
+
+    Optional presentation validation detects constructor or serialization drift
+    between benchmark generation and evaluation versions.
+    """
+
     stage = BaseTaskStage.from_spec({
         "type": spec.stage_type,
         "arguments": spec.arguments,
@@ -210,6 +244,8 @@ def deserialize_stage(
     *,
     validate_presentation: bool = False,
 ) -> BaseTaskStage:
+    """Dispatch reconstruction according to the stage specification ``kind``."""
+
     if isinstance(spec, DeclarativeStageSpec):
         return DeclarativeStage(spec)
     return deserialize_serialized_stage(
@@ -219,6 +255,8 @@ def deserialize_stage(
 
 
 def serialize_task_stages(task: BaseTask) -> List[SerializedStageSpec]:
+    """Serialize every stage of a generated task with stable ordered IDs."""
+
     serialized: List[SerializedStageSpec] = []
     for index, stage in enumerate(task.stages):
         try:
@@ -243,6 +281,8 @@ def deserialize_task_stages(
     *,
     validate_presentation: bool = False,
 ) -> List[BaseTaskStage]:
+    """Reconstruct an ordered sequence containing either stage-spec variant."""
+
     return [
         deserialize_stage(spec, validate_presentation=validate_presentation)
         for spec in specs

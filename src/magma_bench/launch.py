@@ -9,11 +9,14 @@ from pathlib import Path
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("agent", type=str, help="Benchmark agent mode to evaluate.")
+    parser.add_argument(
+        "--benchmark_root",
+        type=Path,
+        default=None,
+        help="Directory produced by magma-bench-build.",
+    )
     
-    group = parser.add_mutually_exclusive_group(required=True)
-    possible_criteria = ["multi-steps", "c-reasoning", "lg-memorization", "all"]
-    group.add_argument("--criteria", nargs="+", choices=possible_criteria, help="One or more criteria.")
-    group.add_argument("--scenarios", nargs="+", help="One or more scenario names.")
+    parser.add_argument("--scenarios", nargs="+", help="One or more scenario names.")
     parser.add_argument(
         "--config_path", "-c",
         type=str,
@@ -59,7 +62,7 @@ def parse_args():
     return args
 
 def build_override_dict(args):
-    excluded = {"agent", "criteria", "scenarios","extra"}
+    excluded = {"agent", "benchmark_root", "scenarios","extra"}
     overrides = {"benchmark":{}}
 
     for key, value in vars(args).items():
@@ -107,7 +110,7 @@ def main(args : argparse.Namespace):
         magma_config=magma_config,
         class_specific_args=args.extra
     )
-    runner.load_benchmark(args.criteria, args.scenarios)
+    runner.load_benchmark(args.benchmark_root, args.scenarios)
 
     runner.run(args)
 
