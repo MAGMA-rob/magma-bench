@@ -50,6 +50,9 @@ from .episode_runtime import build_episode_task
 class ToolsEvalExecutor(ToolsBaseExecutor):
     """Execute independent benchmark episodes in shared simulator slots."""
 
+    _envs : Dict[int, EvalEpisodeContext]
+
+
     def __init__(
             self,
             planner_endpoint: str,
@@ -61,15 +64,12 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             planner_endpoint=planner_endpoint,
             ollama_worker=worker,
         )
-        self._envs: Dict[int, EvalEpisodeContext] = {}
+        self._envs = {}
         self._free_idx = list(range(nb_env))
         self._scenario: Optional[Scenario] = None
         self._group: Optional[EpisodeGroup] = None
         self._group_base_state: Optional[Dict] = None
-        self._registration_counter = 0
-        self._judge_request_counter = 0
-        self._judge_requests: Dict[int, Tuple[int, int]] = {}
-        self._judge_done: Dict[int, Tuple[int, ToolStatus]] = {}
+        self._judge_done: Dict[int, ToolStatus] = {}
         self.lock = threading.Lock()
 
     def initialize_group(
@@ -90,7 +90,6 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
         self._group = group
         self._free_idx = list(range(self.nb_env))
         with self.lock:
-            self._judge_requests.clear()
             self._judge_done.clear()
 
         self.env = self._create_envs(
@@ -120,6 +119,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             task_ref = build_episode_task(self._scenario, episode)
             randomizer = deserialize_runtime_randomizer(episode.semantic)
 
+            # set the env state to the group default one
             env_state = copy.deepcopy(self.env.get_state_dict())
             base_slot_state = extract_env_state_val(
                 self._group_base_state,
@@ -130,6 +130,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                 torch.tensor([env_idx]),
                 base_slot_state,
             )
+
             initialized_state = task_ref.initialize_task(
                 self.trajectory_converter.agents,
                 self.trajectory_converter.agents_name,
@@ -147,13 +148,11 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                 stage_log_length=0,
                 attributes=copy.deepcopy(task_ref.get_init_attributes()),
             )
-            self._registration_counter += 1
             context = EvalEpisodeContext(
                 episode=episode,
                 task_ref=task_ref,
                 randomizer=randomizer,
                 saved_data=saved_data,
-                registration_id=self._registration_counter,
             )
             self._envs[env_idx] = context
 
@@ -176,22 +175,22 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             raise
 
     def release_idx(self, env_idx: int) -> None:
-        """Release a slot and invalidate any asynchronous judge callback."""
+        """Release a slot only after all executor work has completed."""
 
-        context = self._envs.pop(env_idx, None)
+        context = self._envs.get(env_idx)
         if context is None:
             raise RuntimeError("Asking to release an env_idx that is not used")
-        with self.lock:
-            stale_requests = [
-                request_id
-                for request_id, request_context in self._judge_requests.items()
-                if request_context == (env_idx, context.registration_id)
-            ]
-            for request_id in stale_requests:
-                self._judge_requests.pop(request_id, None)
-            completed = self._judge_done.get(env_idx)
-            if completed is not None and completed[0] == context.registration_id:
-                self._judge_done.pop(env_idx, None)
+        
+        if context.tool_context is not None:
+            raise RuntimeError(
+                f"Cannot release environment {env_idx}: a tool is still active"
+            )
+        if context.judge_pending:
+            raise RuntimeError(
+                f"Cannot release environment {env_idx}: a judge is still active"
+            )
+
+        self._envs.pop(env_idx)
         self._free_idx.append(env_idx)
         self._free_idx.sort()
 
@@ -257,6 +256,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             if context.tool_context is not None
         }
         return self.trajectory_converter.step(active_tools)
+    
 
     def verif_ended_tool(self, obs: Dict) -> Dict[int, ToolStatus]:
         """Verify completed tools and advance each episode independently."""
@@ -396,7 +396,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             else:
                 saved_data.active_stage_error_state = tool_context.error_state
                 saved_data.composite_progress = tool_context.composite_progress
-            context.planner_retry_count = 0
+            context.retry_count = 0
             context.tool_context = None
 
             translated = context.randomizer.traduce_end(
@@ -426,16 +426,16 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
 
         for env_idx in env_ids:
             context = self._envs[env_idx]
-            if context.planner_retry_count >= 10:
+            if context.retry_count >= 10:
                 raise RuntimeError(
                     f"Planner error exceeded 10 retries for "
                     f"{context.episode.episode_id}"
                 )
-            context.planner_retry_count += 1
+            context.retry_count += 1
             restored_state = copy.deepcopy(context.saved_data.env_state)
             current_state = extract_env_state_val(env_state, env_idx)
 
-            if context.planner_retry_count % 2:
+            if context.retry_count % 2:
                 source_articulations = current_state.get("articulations")
             else:
                 source_articulations = context.task_ref._default_env_state.get(
@@ -459,12 +459,16 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
         self.env.set_state_dict(env_state)
         self.compute_actions(calls)
 
-    def _submit_judge(self, env_idx: int) -> None:
-        """Submit one text-only answer with a slot-safe request identifier."""
+    def _submit_judge(self, env_idx: int, retry: bool = False) -> None:
+        """Submit one text-only answer using its environment as identifier."""
 
         if self.worker is None:
             raise RuntimeError("Text-only verification requires a judge worker")
         context = self._envs[env_idx]
+        if context.judge_pending and not retry:
+            raise RuntimeError(
+                f"Episode {context.episode.episode_id!r} already waits for a judge"
+            )
         stage_id = context.saved_data.stage_id
         rule = context.task_ref.get_stage_rule(stage_id)
         if not rule:
@@ -473,42 +477,27 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                 "has no verification prompt"
             )
 
-        self._judge_request_counter += 1
-        request_id = self._judge_request_counter
-        with self.lock:
-            if any(
-                request_context == (env_idx, context.registration_id)
-                for request_context in self._judge_requests.values()
-            ):
-                raise RuntimeError(
-                    f"Episode {context.episode.episode_id!r} already waits for a judge"
-                )
-            self._judge_requests[request_id] = (
-                env_idx,
-                context.registration_id,
-            )
+        context.judge_pending = True
         payload = JudgePayload(
             rule=rule,
             model_answer=context.get_answer().get_say(),
-            id=request_id,
+            id=env_idx,
             question=context.task_ref.get_stage_input(
                 stage_id
             ).instruction.get_content(),
         )
-        self.worker.submit(payload, callback=self._on_judge_correction)
+        try:
+            self.worker.submit(payload, callback=self._on_judge_correction)
+        except Exception:
+            context.judge_pending = False
+            raise
 
     def _on_judge_correction(self, future: Future) -> None:
-        """Store a judge result only if its episode still owns the slot."""
+        """Store a judge result for the episode occupying its environment."""
 
-        request_id, judge_response = future.result()
-        with self.lock:
-            request_context = self._judge_requests.pop(request_id, None)
-        if request_context is None:
-            return
-
-        env_idx, registration_id = request_context
+        env_idx, judge_response = future.result()
         context = self._envs.get(env_idx)
-        if context is None or context.registration_id != registration_id:
+        if context is None:
             return
 
         try:
@@ -517,12 +506,12 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             if not isinstance(verdict, bool):
                 raise TypeError("Judge verdict must be a boolean")
         except (json.JSONDecodeError, KeyError, TypeError):
-            if context.judge_retry_count >= 5:
+            if context.retry_count >= 5:
                 verdict = False
                 failure_reason = "Judge failed to return a valid verdict after 6 attempts"
             else:
-                context.judge_retry_count += 1
-                self._submit_judge(env_idx)
+                context.retry_count += 1
+                self._submit_judge(env_idx, retry=True)
                 return
         else:
             failure_reason = str(
@@ -545,7 +534,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             forgiven_tool_calls=context.saved_data.forgiven_tool_calls,
         )
         with self.lock:
-            self._judge_done[env_idx] = (registration_id, status)
+            self._judge_done[env_idx] = status
 
     def _consume_judge_results(self) -> Dict[int, ToolStatus]:
         """Apply main-thread stage transitions for completed judge requests."""
@@ -560,9 +549,9 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
 
         env_state = copy.deepcopy(self.env.get_state_dict())
         state_changed = False
-        for env_idx, (registration_id, status) in completed.items():
+        for env_idx, status in completed.items():
             context = self._envs.get(env_idx)
-            if context is None or context.registration_id != registration_id:
+            if context is None:
                 continue
 
             stage_id = context.saved_data.stage_id
@@ -591,19 +580,17 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                 status.stage_success,
                 context.saved_data.logs,
             )
-            context.judge_retry_count = 0
+            context.retry_count = 0
+            context.judge_pending = False
             out[env_idx] = context.randomizer.traduce_end(
                 {env_idx: status}
             )[env_idx]
 
         if state_changed:
             self.env.set_state_dict(env_state)
-            for env_idx, (registration_id, _) in completed.items():
+            for env_idx in completed:
                 context = self._envs.get(env_idx)
-                if (
-                    context is not None
-                    and context.registration_id == registration_id
-                ):
+                if context is not None:
                     context.saved_data.env_state = extract_env_state_val(
                         env_state,
                         env_idx,

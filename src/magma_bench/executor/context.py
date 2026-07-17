@@ -16,11 +16,10 @@ class EvalEpisodeContext:
     task_ref: BaseTask
     randomizer: RuntimeRandomizer
     saved_data: SavedEnvData
-    registration_id: int
     tool_context: Optional[EnvToolContext] = None
     last_agent_answer: Optional[ValidAgentAnswer] = None
-    planner_retry_count: int = 0
-    judge_retry_count: int = 0
+    retry_count: int = 0
+    judge_pending: bool = False
 
     def get_answer(self) -> ValidAgentAnswer:
         if self.last_agent_answer is None:
