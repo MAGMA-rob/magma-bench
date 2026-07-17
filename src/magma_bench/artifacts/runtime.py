@@ -7,17 +7,20 @@ instructions, goals, errors and stages for validation or execution.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Iterable, List, Optional
 
 from magma_core.base.data_structures import Instruction, StageInput
 from magma_core.base.errors import BaseError
 from magma_core.base.goals import BaseGoal
+from magma_core.base.randomizer import RandomizationSpec, RuntimeRandomizer
 from magma_core.base.stage import (
     BaseTaskStage,
     StageErrorParameters,
     StageGlobalParameters,
 )
 from magma_core.base.tasks import BaseTask
+from magma_core.serialization import decode_value
 
 from magma_bench.evalutations.log_rules import compile_log_rules
 
@@ -27,10 +30,34 @@ from .models import (
     InstructionSpec,
     ObjectSpec,
     SerializedStageSpec,
+    SemanticManifest,
     StageInputSpec,
     StagePresentationSpec,
     StageSpec,
 )
+
+
+def deserialize_runtime_randomizer(
+    semantic: SemanticManifest,
+) -> RuntimeRandomizer:
+    """Rebuild an independent runtime translator from a semantic manifest."""
+
+    return RuntimeRandomizer(
+        RandomizationSpec(
+            tools=decode_value(deepcopy(semantic.tools)),
+            tool_equivalence=decode_value(deepcopy(semantic.tool_equivalence)),
+            attributes_equivalence=decode_value(
+                deepcopy(semantic.attributes_equivalence)
+            ),
+            reversed_attributes_equivalence=decode_value(
+                deepcopy(semantic.reversed_attributes_equivalence)
+            ),
+            attribute_keys_order=list(semantic.attribute_keys_order),
+            attribute_values_order=decode_value(
+                deepcopy(semantic.attribute_values_order)
+            ),
+        )
+    )
 
 
 def serialize_goal(goal: BaseGoal) -> ObjectSpec:
@@ -169,6 +196,10 @@ class DeclarativeStage(BaseTaskStage):
         }
         self.benchmark_expected_behavior = spec.type
 
+
+class DeclarativeActionStage(DeclarativeStage):
+    """Declarative action stage with optional log-based completion rules."""
+
     def verif_log_completion(self, stage_log, full_log) -> int:
         if not self.benchmark_log_rules:
             return 0
@@ -247,6 +278,8 @@ def deserialize_stage(
     """Dispatch reconstruction according to the stage specification ``kind``."""
 
     if isinstance(spec, DeclarativeStageSpec):
+        if spec.type == "act":
+            return DeclarativeActionStage(spec)
         return DeclarativeStage(spec)
     return deserialize_serialized_stage(
         spec,

@@ -118,7 +118,7 @@ class BenchmarkRunner():
         for scenario in tqdm(self._scenarios, desc="Scenarios", position=0, leave=True):
             group_list = load_groups_from_config(scenario)
             for group in group_list:
-                runner = GroupRunner(group, self.tool_executor)
+                runner = GroupRunner(scenario, group, self.tool_executor)
                 # TODO: Manage video saving ??
                 self._run_group(runner)
 
