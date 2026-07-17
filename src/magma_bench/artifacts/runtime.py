@@ -1,0 +1,249 @@
+from __future__ import annotations
+
+from typing import Iterable, List, Optional
+
+from magma_core.base.data_structures import Instruction, StageInput
+from magma_core.base.errors import BaseError
+from magma_core.base.goals import BaseGoal
+from magma_core.base.stage import (
+    BaseTaskStage,
+    StageErrorParameters,
+    StageGlobalParameters,
+)
+from magma_core.base.tasks import BaseTask
+
+from magma_bench.evalutations.log_rules import compile_log_rules
+
+from .models import (
+    ActiveErrorSpec,
+    DeclarativeStageSpec,
+    InstructionSpec,
+    ObjectSpec,
+    SerializedStageSpec,
+    StageInputSpec,
+    StagePresentationSpec,
+    StageSpec,
+)
+
+
+def serialize_goal(goal: BaseGoal) -> ObjectSpec:
+    return ObjectSpec.model_validate(goal.to_spec())
+
+
+def deserialize_goal(spec: ObjectSpec) -> BaseGoal:
+    return BaseGoal.from_spec(spec.model_dump(mode="python"))
+
+
+def serialize_error(
+    error: BaseError,
+    runtime_arguments: Optional[dict] = None,
+) -> ActiveErrorSpec:
+    error_spec = error.to_spec()
+    return ActiveErrorSpec(
+        error_type=error_spec["type"],
+        constructor_arguments=error_spec["arguments"],
+        runtime_arguments={} if runtime_arguments is None else runtime_arguments,
+    )
+
+
+def deserialize_error(spec: ActiveErrorSpec) -> BaseError:
+    error = BaseError.from_spec({
+        "type": spec.error_type,
+        "arguments": spec.constructor_arguments,
+    })
+    error.validate_arguments(spec.runtime_arguments)
+    return error
+
+
+def stage_presentation(stage: BaseTaskStage) -> StagePresentationSpec:
+    stage_input = stage.get_stage_input()
+    return StagePresentationSpec(
+        stage_input=StageInputSpec(
+            instruction=InstructionSpec.model_validate(
+                stage_input.instruction.to_spec()
+            ),
+            answer_after_completion=stage_input.flag_answer_to_user,
+            linked_to_previous=stage_input.linked_to_prev,
+        ),
+        verification_prompt=stage.get_verification_prompt(),
+        stage_goal_description=stage.get_stage_goal_description(),
+    )
+
+
+def _expected_behavior(stage: BaseTaskStage) -> str:
+    declared_behavior = getattr(stage, "expected_behavior", None)
+    if declared_behavior is not None:
+        if declared_behavior not in {"act", "answer", "acknowledge"}:
+            raise ValueError(
+                f"Invalid expected_behavior {declared_behavior!r} on "
+                f"{type(stage).__name__}"
+            )
+        return declared_behavior
+    if not stage.is_text_only():
+        return "act"
+    if stage.get_stage_input().instruction.has_constraint:
+        return "acknowledge"
+    return "answer"
+
+
+def apply_stage_presentation(
+    stage: BaseTaskStage,
+    presentation: StagePresentationSpec,
+) -> None:
+    stage_input = presentation.stage_input
+    instruction = Instruction.from_spec(
+        stage_input.instruction.model_dump(mode="python")
+    )
+    stage.stage_input = StageInput(
+        instruction=instruction,
+        flag_answer_to_user=stage_input.answer_after_completion,
+        linked_to_prev=stage_input.linked_to_previous,
+    )
+    stage.global_parameters.verification_prompt = presentation.verification_prompt
+    stage.stage_goal_description = presentation.stage_goal_description
+
+
+class DeclarativeStage(BaseTaskStage):
+    """Runtime stage for manually authored benchmark stages."""
+
+    target_tool_calls = 0
+    max_tool_calls = 0
+
+    def __init__(self, spec: DeclarativeStageSpec) -> None:
+        self.target_tool_calls = spec.target_tool_calls
+        self.max_tool_calls = spec.max_tool_calls
+        presentation = spec.presentation
+        stage_input = presentation.stage_input
+        errors = [deserialize_error(error) for error in spec.active_errors]
+        super().__init__(
+            goals=[deserialize_goal(goal) for goal in spec.goals],
+            stage_goal_description=presentation.stage_goal_description,
+            stage_input=StageInput(
+                instruction=Instruction.from_spec(
+                    stage_input.instruction.model_dump(mode="python")
+                ),
+                flag_answer_to_user=stage_input.answer_after_completion,
+                linked_to_prev=stage_input.linked_to_previous,
+            ),
+            global_parameters=StageGlobalParameters(
+                reset_at_end=spec.reset_environment_after,
+                additive_stage=spec.additive,
+                verification_prompt=presentation.verification_prompt,
+                allow_tools_before_answer=spec.allow_tools_before_answer,
+                allowed_tools=list(spec.allowed_tools),
+            ),
+            error_parameters=StageErrorParameters(possible_errors=errors),
+        )
+        self.benchmark_log_rules = compile_log_rules([
+            rule.model_dump(mode="python") for rule in spec.log_rules
+        ])
+        self.benchmark_active_error_arguments = {
+            error.get_name(): dict(error_spec.runtime_arguments)
+            for error, error_spec in zip(errors, spec.active_errors)
+        }
+        self.benchmark_expected_behavior = spec.type
+
+    def verif_log_completion(self, stage_log, full_log) -> int:
+        if not self.benchmark_log_rules:
+            return 0
+        return int(all(rule.verify(stage_log)[0] for rule in self.benchmark_log_rules))
+
+
+def serialize_stage(stage: BaseTaskStage, stage_id: str) -> SerializedStageSpec:
+    core_spec = stage.to_spec()
+    return SerializedStageSpec(
+        id=stage_id,
+        stage_type=core_spec["type"],
+        arguments=core_spec["arguments"],
+        expected_behavior=_expected_behavior(stage),
+        presentation=stage_presentation(stage),
+        active_errors=[],
+    )
+
+
+def deserialize_serialized_stage(
+    spec: SerializedStageSpec,
+    *,
+    validate_presentation: bool = False,
+) -> BaseTaskStage:
+    stage = BaseTaskStage.from_spec({
+        "type": spec.stage_type,
+        "arguments": spec.arguments,
+    })
+    if validate_presentation:
+        round_trip_spec = stage.to_spec()
+        if (
+            round_trip_spec["type"] != spec.stage_type
+            or round_trip_spec["arguments"] != spec.arguments
+        ):
+            raise ValueError(
+                f"Serialized stage {spec.id!r} arguments do not round-trip exactly"
+            )
+        if stage_presentation(stage) != spec.presentation:
+            raise ValueError(
+                f"Serialized stage {spec.id!r} presentation differs from its "
+                "constructor arguments"
+            )
+        if _expected_behavior(stage) != spec.expected_behavior:
+            raise ValueError(
+                f"Serialized stage {spec.id!r} expected behavior differs from its "
+                "reconstructed stage"
+            )
+    active_errors = [deserialize_error(error) for error in spec.active_errors]
+    known_error_names = {
+        error.get_name() for error in stage.error_parameters.possible_errors
+    }
+    stage.error_parameters.possible_errors.extend(
+        error for error in active_errors if error.get_name() not in known_error_names
+    )
+    stage.benchmark_active_error_arguments = {
+        error.get_name(): dict(error_spec.runtime_arguments)
+        for error, error_spec in zip(active_errors, spec.active_errors)
+    }
+    stage.benchmark_expected_behavior = spec.expected_behavior
+    apply_stage_presentation(stage, spec.presentation)
+    return stage
+
+
+def deserialize_stage(
+    spec: StageSpec,
+    *,
+    validate_presentation: bool = False,
+) -> BaseTaskStage:
+    if isinstance(spec, DeclarativeStageSpec):
+        return DeclarativeStage(spec)
+    return deserialize_serialized_stage(
+        spec,
+        validate_presentation=validate_presentation,
+    )
+
+
+def serialize_task_stages(task: BaseTask) -> List[SerializedStageSpec]:
+    serialized: List[SerializedStageSpec] = []
+    for index, stage in enumerate(task.stages):
+        try:
+            serialized.append(serialize_stage(stage, f"stage_{index:03d}"))
+        except Exception as error:
+            message = (
+                f"Cannot serialize stage {index} "
+                f"({stage.__class__.__module__}:{stage.__class__.__qualname__}): {error}"
+            )
+            if isinstance(error, NotImplementedError):
+                raise NotImplementedError(message) from error
+            if isinstance(error, TypeError):
+                raise TypeError(message) from error
+            if isinstance(error, ValueError):
+                raise ValueError(message) from error
+            raise RuntimeError(message) from error
+    return serialized
+
+
+def deserialize_task_stages(
+    specs: Iterable[StageSpec],
+    *,
+    validate_presentation: bool = False,
+) -> List[BaseTaskStage]:
+    return [
+        deserialize_stage(spec, validate_presentation=validate_presentation)
+        for spec in specs
+    ]

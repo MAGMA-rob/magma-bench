@@ -6,9 +6,10 @@ import copy
 import json
 import threading
 import time
-
 import requests
 from requests.exceptions import ConnectionError, RequestException
+
+from magma_bench.data_structures import EpisodeSituation
 
 from magma_core.base.agents import AgentAnswer, BadAgentAnswer, ValidAgentAnswer
 from magma_core.protocol.agent import AgentInput, AgentRequest, AgentResponse
@@ -28,7 +29,6 @@ class BenchmarkAgent(ABC):
     """
 
     agent_name: str
-    tools: List[Dict]
 
     def __init__(
         self,
@@ -48,10 +48,6 @@ class BenchmarkAgent(ABC):
         self.remote_agent_name = remote_agent_name
         self.prediction_mode = prediction_mode
         self.timeout = timeout
-        self.tools = []
-
-    def init_task(self, inputs: Dict) -> None:
-        self.tools = inputs.get("tools", [])
 
     @staticmethod
     def stringify_content(content: Any) -> str:
@@ -61,17 +57,11 @@ class BenchmarkAgent(ABC):
             return ""
         return str(content)
 
-    def compute_answer(self, query: Dict, task_attributes: Dict) -> Dict:
-        """
-        Temporary bridge for the old runner.
-
-        The runner will later consume AgentAnswer directly during the executor
-        refactor.
-        """
-        return self.compute_agent_answer(query, task_attributes).to_dict()
-
     @abstractmethod
-    def compute_agent_answer(self, query: Dict, task_attributes: Dict) -> AgentAnswer:
+    def compute_agent_answer(
+        self,
+        batch_inputs : List[Dict[int,EpisodeSituation]]
+    ) -> List[AgentAnswer]:
         raise NotImplementedError()
 
     @abstractmethod

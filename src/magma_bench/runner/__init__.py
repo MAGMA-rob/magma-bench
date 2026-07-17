@@ -1,1 +1,1 @@
-from .runner import BenchmarkRunner
+from .old_runner import BenchmarkRunner

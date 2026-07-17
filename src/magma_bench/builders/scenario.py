@@ -1,25 +1,15 @@
 from typing import Dict, List, Tuple
-from dataclasses import dataclass
-from pathlib import Path
 
 from magma_bench.executor import ToolsEvalExecutor
 from .task import Task
 from .stage import Stage
 from magma_bench.evalutations import evaluate_env_success
 from magma_core.base.data_structures import ActiveStageErrorState
+from magma_core.base.data_structures.agent_call import Call
 from magma_core.base.tasks import BaseBenchmarkTask
 from magma_scenarios import load_preset
 
-@dataclass
-class ScenarioConfig:
-
-    scenario_name : str
-    scenario_id : str
-    task_cls_name : str
-    mplib_options : Dict
-    tasks_path : List[Path]
-    evaluated_criteria : List[str]
-    task_decomp : Dict[str,List[str]]
+from magma_bench.data_structures import ScenarioConfig
 
 class Scenario():
 
@@ -150,7 +140,7 @@ class Scenario():
         if not self.env: raise ValueError("Env not initialized")
         task = self.tasks[idx]
         self.tool_executor.set_task_env_options(getattr(task, "env_options", {}))
-        self.env.reset(seed=self.seed,options=self.tool_executor.get_env_options(0))
+        self.env.reset(seed=self.seed,options=self.tool_executor.get_env_options())
         self.tool_executor.log_reset() #reset log at each new tasks
         self.tool_executor.task_ref.reset_stage() #Allows to reset the attributes properly (in case of modification)
         return task
@@ -166,9 +156,9 @@ class Scenario():
     
     ########## EXECUTION
     
-    def send_action(self, action : Dict, error_state : ActiveStageErrorState):
+    def send_action(self, calls : List[Call], error_state : ActiveStageErrorState):
         """Send the tool call to the evaluation env"""
-        tool_calls = {0 : action}
+        tool_calls = {0 : calls}
         self.tool_executor.compute_actions(tool_calls, error_state)
         return True
     
@@ -184,7 +174,7 @@ class Scenario():
         return self.tool_executor.verif_ended_tool(obs), obs
     
     def env_reset(self):
-        if self.env: self.env.reset(seed=self.seed,options=self.tool_executor.get_env_options(0))
+        if self.env: self.env.reset(seed=self.seed,options=self.tool_executor.get_env_options())
         self.tool_executor.log_reset()
 
     ########## CLEANER
