@@ -12,7 +12,6 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 
-from magma_core.base.agents import ValidAgentAnswer
 from magma_core.base.data_structures import (
     EnvToolContext,
     RobotToolStatus,
@@ -20,6 +19,7 @@ from magma_core.base.data_structures import (
     StageSuccess,
     ToolErrorFlag,
     ToolStatus,
+    ValidExecutionReq
 )
 from magma_core.base.envs import DefaultEnv
 from magma_core.base.executor import ToolsBaseExecutor
@@ -196,7 +196,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
 
     def compute_actions(
             self,
-            tools_call: Dict[int, ValidAgentAnswer],
+            tools_call: Dict[int, ValidExecutionReq],
         ) -> None:
         """Transform agent answers into actions for their assigned slots."""
 
@@ -215,7 +215,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                 self._submit_judge(env_idx)
                 continue
 
-            calls = answer.get_action()
+            calls = answer.get_tool_calls()
             if not calls:
                 raise RuntimeError(
                     "An empty answer reached the evaluation executor"
@@ -283,7 +283,8 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                 context.tool_context = None
                 retry_env_ids.append(env_idx)
                 continue
-
+            
+            # Apply possible state changement (move_to, object state changement)
             state_changed |= apply_env_state_updates(
                 env_state,
                 env_idx,
@@ -295,6 +296,8 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             self.env.set_state_dict(env_state)
             obs = self.env.get_obs()
 
+        # MAIN VERIFICATION LOOP
+        # Verify Goals and Logs on completed env (tool finished)
         for env_idx, context, tool_context, tool_status in completed:
             task_ref = context.task_ref
             saved_data = context.saved_data
@@ -307,8 +310,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                 else task_ref.get_stage_input(stage_id + 1)
             )
 
-            if tool_context.has_terminal_tool_failure():
-                tool_status.stage_success = StageSuccess.FAILED
+            if task_ref.is_stage_text_only(stage_id):
                 tool_status.stage_state = task_ref.get_stage_state(
                     stage_id,
                     tool_status.tool_calls,
@@ -316,15 +318,13 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                     tool_status.stage_success,
                     tool_context.logs,
                 )
+                # catastrophic failure
+                # faut stopper la tache carrément
+
             elif tool_context.is_full_error():
-                tool_status.stage_state = task_ref.get_stage_state(
-                    stage_id,
-                    tool_status.tool_calls,
-                    tool_status.forgiven_tool_calls,
-                    tool_status.stage_success,
-                    tool_context.logs,
-                )
-            elif task_ref.is_stage_text_only(stage_id):
+                #All tools have fail (error in processing, bad robot name, full syntax errors)
+                if tool_context.has_terminal_tool_failure():
+                    tool_status.stage_success = StageSuccess.FAILED
                 tool_status.stage_state = task_ref.get_stage_state(
                     stage_id,
                     tool_status.tool_calls,
@@ -333,6 +333,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                     tool_context.logs,
                 )
             else:
+                #valid execution
                 env_score = task_ref.verif_stage_env_completion(
                     stage_id,
                     obs,
@@ -421,7 +422,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
         """Restore committed states and replay answers after planner failures."""
 
         env_state = copy.deepcopy(self.env.get_state_dict())
-        calls: Dict[int, ValidAgentAnswer] = {}
+        answers: Dict[int, ValidExecutionReq] = {}
         robot_names = self.trajectory_converter.agents_name
 
         for env_idx in env_ids:
@@ -454,10 +455,10 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                 restored_state,
                 strict=False,
             )
-            calls[env_idx] = context.get_answer()
+            answers[env_idx] = context.get_answer()
 
         self.env.set_state_dict(env_state)
-        self.compute_actions(calls)
+        self.compute_actions(answers)
 
     def _submit_judge(self, env_idx: int, retry: bool = False) -> None:
         """Submit one text-only answer using its environment as identifier."""

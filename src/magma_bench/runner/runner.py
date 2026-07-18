@@ -99,8 +99,23 @@ class BenchmarkRunner():
 
         group_not_done = True
         while group_not_done:
+            action = self.tool_executor.step() # this will return the action to take for each env
+            obs, _, _, _, _ = self.tool_executor.env.step(action)
 
-            group.tick(None)
+            tools_ended = self.tool_executor.verif_ended_tool(obs)
+            fetched_answer = self.agent.get_pending_answer()
+
+            bench_tick = group.tick(tools_ended, fetched_answer)
+
+            if bench_tick.has_inputs_for_agents():
+                self.agent.add_inputs(bench_tick.to_agents)
+
+            if bench_tick.has_call_for_executor():
+                self.tool_executor.compute_actions(
+                    bench_tick.to_executor
+                )
+
+            
     
     def run(self, args):
         """Run the evaluation process on the pre-loaded benchmarks"""

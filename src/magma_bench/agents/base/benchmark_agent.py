@@ -23,12 +23,13 @@ class BenchmarkAgent(ABC):
     """
     Agent evaluated by magma_bench.
 
-    A benchmark agent is the complete policy that plays in the environment. It
-    can own explicit memory, history and task-state logic, but it talks to a
-    single magma_agent deployment through the /v1/responses protocol.
+    A benchmark agent is a class that is the intermediate with the magma agent server.
     """
 
     agent_name: str
+
+    waiting_inputs : Dict[int, EpisodeSituation]
+    completed_answers : List[AgentAnswer]
 
     def __init__(
         self,
@@ -49,6 +50,12 @@ class BenchmarkAgent(ABC):
         self.prediction_mode = prediction_mode
         self.timeout = timeout
 
+        self.lock = threading.Lock()
+        self.completed_answers = []
+        self.waiting_inputs = {}
+        self.thread_running = True
+        self.thread = threading.Thread(target=self._periodic_computing_of_answers, args=(4,), daemon=True)
+
     @staticmethod
     def stringify_content(content: Any) -> str:
         if isinstance(content, (dict, list)):
@@ -60,7 +67,7 @@ class BenchmarkAgent(ABC):
     @abstractmethod
     def compute_agent_answer(
         self,
-        batch_inputs : List[Dict[int,EpisodeSituation]]
+        batch_inputs : Dict[int,EpisodeSituation]
     ) -> List[AgentAnswer]:
         raise NotImplementedError()
 
@@ -219,102 +226,43 @@ class BenchmarkAgent(ABC):
             "agent_url": self.agent_url,
             "prediction_mode": self.prediction_mode,
         }
+    
 
-    def reset_task(self) -> None:
-        self.tools = []
-        self.reset_step()
+    def get_pending_answer(self) -> List[AgentAnswer]:
+        with self.lock:
+            out = self.completed_answers.copy()
+            self.completed_answers.clear()
+        return out
 
-    def reset_step(self) -> None:
-        pass
+    def add_inputs(self, inputs : Dict[int,EpisodeSituation]):
+        with self.lock:
+            for idx, episode in inputs.items():
+                if idx in self.waiting_inputs:
+                    raise RuntimeError("Trying to add another episode for a same id")
+                self.waiting_inputs[idx]=episode
 
-    def get_listed_memory(self) -> List:
-        return []
+    def _periodic_computing_of_answers(self, interval : float = 4.0):
+        try:
+            while self.thread_running:
+                start_time = time.time()
+                to_do : Dict[int,EpisodeSituation] = {}
+                # Check if there is some pending inputs
+                with self.lock:
+                    if len(self.waiting_inputs) > 0:
+                        to_do = self.waiting_inputs.copy()
+                        self.waiting_inputs.clear()
+                
+                if len(to_do) > 0:
+                    answers = self.compute_agent_answer(to_do)
+                    with self.lock:
+                        self.completed_answers.extend(answers)
 
+                elapsed = time.time() - start_time
+                sleep_time = max(0, interval - elapsed)
+                time.sleep(sleep_time)
 
-class ManagedBenchmarkAgent(BenchmarkAgent, ABC):
-    """
-    Base class for agents with local benchmark state.
-    """
-
-    memory: Any
-    preserved_memory_indices: List[int]
-    message_history: List[Dict]
-    max_history_length: int = 4
-    time_window: float = 90
-
-    def __init__(
-        self,
-        agent_url: str,
-        remote_agent_name: str,
-        prediction_mode: str = "tool_select",
-        max_time_window: float = 90,
-        timeout: float = 360,
-        **args,
-    ) -> None:
-        super().__init__(
-            agent_url=agent_url,
-            remote_agent_name=remote_agent_name,
-            prediction_mode=prediction_mode,
-            timeout=timeout,
-            **args,
-        )
-        self.time_window = max_time_window
-        self.message_history = []
-        self.memory = self.empty_memory()
-        self.preserved_memory_indices = []
-        self.memory_update_lock = threading.Lock()
-
-    def empty_memory(self) -> Any:
-        return []
-
-    def init_task(self, inputs: Dict) -> None:
-        super().init_task(inputs)
-        self.memory = copy.deepcopy(inputs.get("memory", self.empty_memory()))
-        self.preserved_memory_indices = inputs.get("preserved_memory_indices", [])
-
-    def add_message_to_history(
-        self,
-        query: Dict,
-        model_answer: Any,
-        model_action: Any = None,
-        model_answer_timestamps=None,
-    ) -> None:
-        if not model_answer_timestamps or not isinstance(model_answer_timestamps, float):
-            model_answer_timestamps = query["timestamp"] + 10
-
-        self.message_history.extend(
-            [
-                format_history_message(
-                    query.get("author", "USER"),
-                    query.get("content"),
-                    query["timestamp"],
-                ),
-                format_model_history_message(
-                    model_answer,
-                    model_action,
-                    model_answer_timestamps,
-                ),
-            ]
-        )
-
-        while len(self.message_history) > self.max_history_length:
-            self.message_history.pop(0)
-
-    def get_recent_messages(self, current_time: float) -> List[Dict]:
-        self.message_history = [
-            message
-            for message in self.message_history
-            if current_time - message["timestamp"] <= self.time_window
-        ]
-        return self.message_history
-
-    def get_listed_memory(self) -> List:
-        if isinstance(self.memory, list):
-            return copy.deepcopy(self.memory)
-        if isinstance(self.memory, dict):
-            return copy.deepcopy(self.memory.get("memory", []))
-        return []
-
-    def reset_step(self) -> None:
-        self.memory = self.empty_memory()
-        self.message_history = []
+        except Exception as e:
+            with self.lock:
+                self.thread_exception = e
+        with self.lock:
+            self.thread_running = False

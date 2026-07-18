@@ -1,10 +1,24 @@
 from typing import Dict, List
+from dataclasses import dataclass
 
 from magma_bench.loader import EpisodeGroup
-from magma_bench.data_structures import EpisodeData, Scenario
+from magma_bench.data_structures import EpisodeData, Scenario, EpisodeSituation
 from magma_bench.executor import ToolsEvalExecutor
 
 from magma_core.base.agents import AgentAnswer
+from magma_core.base.data_structures import ValidExecutionReq, ToolStatus
+
+@dataclass(frozen=True)
+class BenchmarkTick():
+
+    to_agents : Dict[int, EpisodeSituation]
+    to_executor : Dict[int, ValidExecutionReq]
+
+    def has_inputs_for_agents(self) -> bool:
+        return len(self.to_agents) > 0
+    
+    def has_call_for_executor(self) -> bool:
+        return len(self.to_executor) > 0
 
 class GroupRunner:
     """
@@ -38,9 +52,9 @@ class GroupRunner:
 
     def tick(
         self,
-        status_from_env : List[Dict],
+        status_from_env : Dict[int, ToolStatus],
         answers_from_agent : List[AgentAnswer]
-    ):
+    ) -> BenchmarkTick:
         # 1 Apply answers from agents
         if len(answers_from_agent)>0:
             self._answers_tick(answers_from_agent)
@@ -49,7 +63,7 @@ class GroupRunner:
         # 2 apply status_from_env
 
 
-
+    ...
 
 
 

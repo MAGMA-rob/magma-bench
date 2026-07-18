@@ -1,12 +1,12 @@
-from typing import Any, Dict
+from typing import Any, Dict, List
 import time
 
+from magma_bench.data_structures import EpisodeSituation
 from magma_core.base.agents import AgentAnswer
+from magma_bench.agents.base import BenchmarkAgent
 
-from magma_bench.agents.base import ManagedBenchmarkAgent
 
-
-class HistoryReactiveBenchmarkAgent(ManagedBenchmarkAgent):
+class HistoryReactiveBenchmarkAgent(BenchmarkAgent):
     """
     History-reactive benchmark agent backed by magma_agent /v1/responses.
     """
@@ -27,7 +27,7 @@ class HistoryReactiveBenchmarkAgent(ManagedBenchmarkAgent):
     def get_candidate_counts(self) -> Dict[str, int]:
         return {"commander": 1}
 
-    def compute_agent_answer(self, query: Dict, task_attributes: Dict) -> AgentAnswer:
+    def compute_agent_answer(self, batch_inputs: Dict[int, EpisodeSituation]) -> List[AgentAnswer]:
         if not task_attributes or not query:
             raise ValueError("Inputs must contain task attributes and a query.")
 

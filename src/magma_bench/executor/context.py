@@ -1,8 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional
 
-from magma_core.base.data_structures import EnvToolContext, SavedEnvData
-from magma_core.base.agents import ValidAgentAnswer
+from magma_core.base.data_structures import EnvToolContext, SavedEnvData, ValidExecutionReq
 from magma_core.base.randomizer import RuntimeRandomizer
 from magma_core.base.tasks import BaseTask
 
@@ -17,11 +16,11 @@ class EvalEpisodeContext:
     randomizer: RuntimeRandomizer
     saved_data: SavedEnvData
     tool_context: Optional[EnvToolContext] = None
-    last_agent_answer: Optional[ValidAgentAnswer] = None
+    last_agent_answer: Optional[ValidExecutionReq] = None
     retry_count: int = 0
     judge_pending: bool = False
 
-    def get_answer(self) -> ValidAgentAnswer:
+    def get_answer(self) -> ValidExecutionReq:
         if self.last_agent_answer is None:
             raise RuntimeError("Trying to access the last agent answer of an episode which is None")
         return self.last_agent_answer
