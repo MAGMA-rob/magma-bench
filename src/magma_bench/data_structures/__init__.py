@@ -1,7 +1,13 @@
 from .benchmark import Episode, Scenario
-from .running_structure import EpisodeSituation, RunningState, EpisodeData
+from .running_structure import (
+    BenchmarkAgentResult,
+    EpisodeData,
+    EpisodeSituation,
+    RunningState,
+)
 
 __all__ = [
+    "BenchmarkAgentResult",
     "Episode",
     "EpisodeData",
     "EpisodeSituation",

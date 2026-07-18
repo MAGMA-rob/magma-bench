@@ -103,7 +103,7 @@ class BenchmarkRunner():
             obs, _, _, _, _ = self.tool_executor.env.step(action)
 
             tools_ended = self.tool_executor.verif_ended_tool(obs)
-            fetched_answer = self.agent.get_pending_answer()
+            fetched_answer = self.agent.get_pending_results()
 
             bench_tick = group.tick(tools_ended, fetched_answer)
 
@@ -138,6 +138,7 @@ class BenchmarkRunner():
                 self._run_group(runner)
 
         self.result_manager.stop()
+        self.agent.stop()
         if self._skip_metrics:
             return
         data = self.result_manager.compute_global_metrics()

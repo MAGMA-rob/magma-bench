@@ -1,11 +1,16 @@
 from typing import Any, Dict, List
 
 from magma_core.base.agents import AgentAnswer
+from magma_core.protocol.agent import AgentOutput
 
-from magma_bench.agents.base import ManagedBenchmarkAgent
+from magma_bench.agents.base import BenchmarkAgent
+from magma_bench.data_structures import (
+    BenchmarkAgentResult,
+    EpisodeSituation,
+)
 
 
-class TaskStateReactiveBenchmarkAgent(ManagedBenchmarkAgent):
+class TaskStateReactiveBenchmarkAgent(BenchmarkAgent):
     """
     Task-state-reactive benchmark agent backed by magma_agent /v1/responses.
     """
@@ -22,15 +27,6 @@ class TaskStateReactiveBenchmarkAgent(ManagedBenchmarkAgent):
             prediction_mode=args.pop("prediction_mode", "tool_select"),
             **args,
         )
-        self.completed_todos: List[str] = []
-        self.completed_goals: List[str] = []
-
-    def empty_memory(self) -> Dict[str, List[str]]:
-        return {
-            "rules": [],
-            "goals": [],
-            "todo": [],
-        }
 
     def get_candidate_counts(self) -> Dict[str, int]:
         return {
@@ -38,83 +34,106 @@ class TaskStateReactiveBenchmarkAgent(ManagedBenchmarkAgent):
             "dispatcher": 1,
         }
 
-    def compute_agent_answer(self, query: Dict, task_attributes: Dict) -> AgentAnswer:
-        if not task_attributes or not query:
-            raise ValueError("Inputs must contain task attributes and a query.")
-
-        payload = {
-            "memory": self._memory_payload(),
-            "attributes": task_attributes,
-            "history": [],
-            "function": self.tools,
-            "instruction": {
-                "type": self._instruction_type(query),
-                "content": self.stringify_content(query.get("content", "")),
-            },
-            "completed_todos": self.completed_todos,
-            "completed_goals": self.completed_goals,
+    def compute_agent_results(
+        self,
+        batch_inputs: Dict[int, EpisodeSituation],
+    ) -> List[BenchmarkAgentResult]:
+        payloads = {
+            env_idx: {
+                "memory": situation.memory,
+                "attributes": situation.attributes,
+                "history": situation.history,
+                "function": situation.tools,
+                "instruction": {
+                    "type": (
+                        "tool_result"
+                        if situation.current_instruction.get_role() == "SYSTEM"
+                        else "message"
+                    ),
+                    "content": self.stringify_content(
+                        situation.current_instruction.get_content()
+                    ),
+                },
+                "completed_todos": situation.agent_state.get(
+                    "completed_todos",
+                    [],
+                ),
+                "completed_goals": situation.agent_state.get(
+                    "completed_goals",
+                    [],
+                ),
+            }
+            for env_idx, situation in batch_inputs.items()
         }
+        responses = self.send_to_agent(payloads)
 
-        response = self.send_to_agent(payload)
-        answer = self.normalize_model_response(response)
-        if response["valid"]:
-            output = response["output"]
-            tsm = output.get("tsm", {})
-            if isinstance(tsm, dict) and isinstance(tsm.get("representation"), dict):
-                self.memory = tsm["representation"]
-            completed_goals = output.get("completed_goals", [])
-            if isinstance(completed_goals, list):
-                self.completed_goals = [str(goal) for goal in completed_goals]
-            dispatcher = output.get("dispatcher", {})
-            completed_todos = dispatcher.get("completed_todos", [])
-            if isinstance(completed_todos, list):
-                self.completed_todos = [str(todo) for todo in completed_todos]
-        return answer
+        results = []
+        for env_idx, situation in batch_inputs.items():
+            response = responses[env_idx]
+            answer = self.normalize_model_response(response)
+            updated = self.update_conversation(situation, answer)
+            if response.valid:
+                output = response.output
+                tsm = output.get("tsm", {})
+                if isinstance(tsm, dict):
+                    representation = tsm.get("representation")
+                    if isinstance(representation, dict):
+                        updated.memory = representation.copy()
+
+                completed_goals = output.get("completed_goals", [])
+                if isinstance(completed_goals, list):
+                    updated.agent_state["completed_goals"] = [
+                        str(goal)
+                        for goal in completed_goals
+                    ]
+
+                dispatcher = output.get("dispatcher", {})
+                if isinstance(dispatcher, dict):
+                    completed_todos = dispatcher.get("completed_todos", [])
+                    if isinstance(completed_todos, list):
+                        updated.agent_state["completed_todos"] = [
+                            str(todo)
+                            for todo in completed_todos
+                        ]
+
+            results.append(
+                BenchmarkAgentResult(
+                    answer=answer,
+                    situation=updated,
+                )
+            )
+        return results
 
     def extract_action(self, output: Dict[str, Any]) -> Any:
         dispatcher = output.get("dispatcher", {})
         if not isinstance(dispatcher, dict):
             return {}
         tools = dispatcher.get("tools", [])
-        if tools:
-            return {
-                call["robot"]: {
-                    "name": call["name"],
-                    "arguments": call.get("arguments", {}),
-                }
-                for call in tools
+        if not isinstance(tools, list):
+            return {}
+        return {
+            call["robot"]: {
+                "name": call["name"],
+                "arguments": call.get("arguments", {}),
             }
-        return {}
+            for call in tools
+        }
 
     def normalize_model_response(
         self,
-        response: Dict[str, Any],
-        source_node_id: int = 0,
+        response: AgentOutput,
         agent_step_id: int = 0,
     ) -> AgentAnswer:
-        if response.get("valid", True):
-            output = response.get("output", {})
+        if response.valid:
+            output = response.output
             dispatcher = output.get("dispatcher", {})
             if isinstance(dispatcher, dict) and "message" in dispatcher:
                 message = dispatcher["message"]
-                if isinstance(message, dict) and message.get("recipient") == "user":
+                if (
+                    isinstance(message, dict)
+                    and message.get("recipient") == "user"
+                ):
                     output = dict(output)
                     output["say"] = message.get("content", "")
-                    response = dict(response)
-                    response["output"] = output
-        return super().normalize_model_response(response, source_node_id, agent_step_id)
-
-    def reset_step(self) -> None:
-        super().reset_step()
-        self.completed_todos = []
-        self.completed_goals = []
-
-    def _memory_payload(self) -> Dict[str, Any]:
-        if not isinstance(self.memory, dict):
-            return self.empty_memory()
-        return self.memory
-
-    def _instruction_type(self, query: Dict) -> str:
-        if query.get("author") == "SYSTEM":
-            return "tool_result"
-        return "message"
+                    response = response.model_copy(update={"output": output})
+        return super().normalize_model_response(response, agent_step_id)

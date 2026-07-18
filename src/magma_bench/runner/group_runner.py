@@ -1,18 +1,23 @@
-from typing import Dict, List
 from dataclasses import dataclass
+from typing import Dict, List
 
 from magma_bench.loader import EpisodeGroup
-from magma_bench.data_structures import EpisodeData, Scenario, EpisodeSituation
+from magma_bench.data_structures import (
+    BenchmarkAgentResult,
+    EpisodeData,
+    EpisodeSituation,
+    RunningState,
+    Scenario,
+)
 from magma_bench.executor import ToolsEvalExecutor
 
-from magma_core.base.agents import AgentAnswer
-from magma_core.base.data_structures import ValidExecutionReq, ToolStatus
+from magma_core.base.data_structures import ToolStatus, ValidExecutionReq
 
 @dataclass(frozen=True)
-class BenchmarkTick():
+class BenchmarkTick:
 
-    to_agents : Dict[int, EpisodeSituation]
-    to_executor : Dict[int, ValidExecutionReq]
+    to_agents: Dict[int, EpisodeSituation]
+    to_executor: Dict[int, ValidExecutionReq]
 
     def has_inputs_for_agents(self) -> bool:
         return len(self.to_agents) > 0
@@ -52,28 +57,57 @@ class GroupRunner:
 
     def tick(
         self,
-        status_from_env : Dict[int, ToolStatus],
-        answers_from_agent : List[AgentAnswer]
+        status_from_env: Dict[int, ToolStatus],
+        results_from_agent: List[BenchmarkAgentResult],
     ) -> BenchmarkTick:
-        # 1 Apply answers from agents
-        if len(answers_from_agent)>0:
-            self._answers_tick(answers_from_agent)
+        to_executor = self._answers_tick(results_from_agent)
 
+        # Tool-status transitions and terminal result registration are handled
+        # by the next runner implementation step. Agent-state updates are
+        # intentionally independent from that scheduling logic.
+        if status_from_env:
+            raise NotImplementedError(
+                "Tool-status transitions are not implemented in GroupRunner yet"
+            )
 
-        # 2 apply status_from_env
+        to_agents = {}
 
+        return BenchmarkTick(
+            to_agents=to_agents,
+            to_executor=to_executor,
+        )
 
-    ...
+    def _answers_tick(
+        self,
+        results: List[BenchmarkAgentResult],
+    ) -> Dict[int, ValidExecutionReq]:
+        to_executor = {}
+        for result in results:
+            answer = result.answer
+            env_idx = answer.source_node_id
+            episode_data = self.episode_data_per_env.get(env_idx)
+            if episode_data is None:
+                raise KeyError(
+                    f"No running episode is assigned to environment {env_idx}"
+                )
+            if episode_data.state != RunningState.WAITING_MODEL_ANSWER:
+                raise RuntimeError(
+                    f"Environment {env_idx} did not wait for an agent answer"
+                )
 
-
-
-
-
-
-
-
-
-    def _answers_tick(self, answers_list : List[AgentAnswer]):
-        for answer in answers_list:
+            episode_data.situation = result.situation
             if not answer.is_valid():
-                self.episode_data_per_env[answer.source_node_id].apply_answer()
+                self.executor_ref.release_idx(env_idx)
+                self.episode_data_per_env.pop(env_idx)
+                continue
+            
+            episode_data.state = RunningState.RUNNING
+
+            to_executor[env_idx] = ValidExecutionReq(
+                source_node_id=env_idx,
+                agent_step_id=0,
+                calls=answer.get_action(),
+                say=answer.get_say()
+            )
+            
+        return to_executor

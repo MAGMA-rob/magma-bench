@@ -1,20 +1,32 @@
+import copy
 from dataclasses import dataclass, field
-from typing import Any, List, Dict, Tuple, Literal
+from typing import Any, Dict, List, Literal, Tuple
 from enum import Enum
 
-from magma_core.utils.data_utils import apply_att_modif
+from magma_core.base.agents import AgentAnswer
 from magma_core.base.data_structures import Instruction
+from magma_core.utils.data_utils import apply_att_modif
 
 
 @dataclass
 class EpisodeSituation:
-    """Agent-visible state for one running benchmark episode."""
+    """Complete agent-visible state for one running benchmark episode.
+
+    The runner owns this object. Benchmark-agent adapters receive a snapshot
+    and return an updated snapshot, so their background thread never mutates
+    runner state directly.
+
+    ``memory`` is the task representation exposed to every agent family.
+    ``agent_state`` is an opaque extension point for adapter-specific runtime
+    values such as completed task-state goals or todos.
+    """
 
     tools: List[Dict]
     attributes: Dict
+    memory: Dict[str, Any]
     current_instruction: Instruction
     history: List[Any] = field(default_factory=list)
-
+    agent_state: Dict[str, Any] = field(default_factory=dict)
 
     def modify_attributes(
         self,
@@ -27,15 +39,31 @@ class EpisodeSituation:
 
     def set_current_instruction(self, instruction: Instruction) -> None:
         self.current_instruction = instruction
-        self.history.append(instruction)
 
-    def to_dict(self) -> Dict:
+    def snapshot(self) -> "EpisodeSituation":
+        """Return an independent copy suitable for background processing."""
+
+        return copy.deepcopy(self)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize the generic situation without flattening agent state."""
+
         return {
             "tools": self.tools,
             "attributes": self.attributes,
+            "memory": self.memory,
             "history": self.history,
             "current_instruction": self.current_instruction.to_spec(),
+            "agent_state": self.agent_state,
         }
+
+
+@dataclass(frozen=True)
+class BenchmarkAgentResult:
+    """One normalized answer and the episode state produced alongside it."""
+
+    answer: AgentAnswer
+    situation: EpisodeSituation
 
 
 class RunningState(Enum):

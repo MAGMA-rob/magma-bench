@@ -156,12 +156,22 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             )
             self._envs[env_idx] = context
 
+            initial_situation = randomizer.get_randomized_situation(
+                task_ref.get_init_situation()
+            )
+            public_history = json.loads(
+                randomizer.traduce_attributes_to_llm(
+                    json.dumps(initial_situation.history)
+                )
+            )
             situation = EpisodeSituation(
                 tools=decode_value(copy.deepcopy(episode.semantic.tools)),
                 attributes=decode_value(
                     copy.deepcopy(episode.semantic.visible_attributes)
                 ),
+                memory=initial_situation.memory,
                 current_instruction=task_ref.get_stage_input(0).instruction,
+                history=public_history,
             )
             return EpisodeData(
                 episode_id=episode.episode_id,

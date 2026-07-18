@@ -1,18 +1,23 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
-import copy
+from typing import Any, Dict, List, Optional
 import json
 import threading
 import time
+
 import requests
 from requests.exceptions import ConnectionError, RequestException
 
-from magma_bench.data_structures import EpisodeSituation
+from magma_bench.data_structures import BenchmarkAgentResult, EpisodeSituation
 
 from magma_core.base.agents import AgentAnswer, BadAgentAnswer, ValidAgentAnswer
-from magma_core.protocol.agent import AgentInput, AgentRequest, AgentResponse
+from magma_core.protocol.agent import (
+    AgentInput,
+    AgentOutput,
+    AgentRequest,
+    AgentResponse,
+)
 from magma_core.utils.text_utils import (
     format_history_message,
     format_model_history_message,
@@ -28,8 +33,8 @@ class BenchmarkAgent(ABC):
 
     agent_name: str
 
-    waiting_inputs : Dict[int, EpisodeSituation]
-    completed_answers : List[AgentAnswer]
+    waiting_inputs: Dict[int, EpisodeSituation]
+    completed_results: List[BenchmarkAgentResult]
 
     def __init__(
         self,
@@ -51,10 +56,16 @@ class BenchmarkAgent(ABC):
         self.timeout = timeout
 
         self.lock = threading.Lock()
-        self.completed_answers = []
+        self.completed_results = []
         self.waiting_inputs = {}
+        self.thread_exception: Optional[Exception] = None
         self.thread_running = True
-        self.thread = threading.Thread(target=self._periodic_computing_of_answers, args=(4,), daemon=True)
+        self.thread = threading.Thread(
+            target=self._periodic_computing_of_answers,
+            args=(4,),
+            daemon=True,
+        )
+        self.thread.start()
 
     @staticmethod
     def stringify_content(content: Any) -> str:
@@ -65,24 +76,33 @@ class BenchmarkAgent(ABC):
         return str(content)
 
     @abstractmethod
-    def compute_agent_answer(
+    def compute_agent_results(
         self,
-        batch_inputs : Dict[int,EpisodeSituation]
-    ) -> List[AgentAnswer]:
+        batch_inputs: Dict[int, EpisodeSituation],
+    ) -> List[BenchmarkAgentResult]:
         raise NotImplementedError()
 
     @abstractmethod
     def get_candidate_counts(self) -> Dict[str, int]:
         raise NotImplementedError()
 
-    def send_to_agent(self, input_payload: Dict[str, Any]) -> Dict[str, Any]:
+    def send_to_agent(
+        self,
+        input_payloads: Dict[int, Dict[str, Any]],
+    ) -> Dict[int, AgentOutput]:
+        """Send one real magma_agent batch while preserving environment IDs."""
+
+        if not input_payloads:
+            return {}
+
         request = AgentRequest(
             agent=self.remote_agent_name,
             inputs=[
                 AgentInput(
-                    id=0,
+                    id=env_idx,
                     input=input_payload,
                 )
+                for env_idx, input_payload in input_payloads.items()
             ],
             candidate_counts=self.get_candidate_counts(),
         )
@@ -104,35 +124,63 @@ class BenchmarkAgent(ABC):
             raise RuntimeError(f"[magma_bench] Request failed: {error}{response_text}") from error
 
         outputs = AgentResponse.model_validate(response.json()).root
-        if len(outputs) != 1:
+        if len(outputs) != len(input_payloads):
             raise RuntimeError(
-                f"Expected exactly one agent output, got {len(outputs)} in {elapsed:.2f}s."
+                f"Expected one output per input ({len(input_payloads)}), "
+                f"got {len(outputs)} in {elapsed:.2f}s."
             )
-        output = outputs[0]
-        if output.source_id != 0:
-            raise RuntimeError(f"Agent returned unknown source_id {output.source_id}.")
-        return {
-            "valid": output.valid,
-            "output": output.output,
-        }
+
+        outputs_by_source: Dict[int, AgentOutput] = {}
+        for output in outputs:
+            if output.source_id not in input_payloads:
+                raise RuntimeError(
+                    f"Agent returned unknown source_id {output.source_id}."
+                )
+            if output.source_id in outputs_by_source:
+                raise RuntimeError(
+                    f"Agent returned multiple outputs for source_id "
+                    f"{output.source_id}."
+                )
+            outputs_by_source[output.source_id] = output
+
+        missing_sources = set(input_payloads) - set(outputs_by_source)
+        if missing_sources:
+            raise RuntimeError(
+                f"Agent returned no output for source IDs "
+                f"{sorted(missing_sources)}."
+            )
+        return outputs_by_source
 
     def normalize_model_response(
         self,
-        response: Dict[str, Any],
-        source_node_id: int = 0,
+        response: AgentOutput,
         agent_step_id: int = 0,
     ) -> AgentAnswer:
-        if not response.get("valid", True):
-            output = response.get("output", {})
+        output = response.output
+        if not response.valid:
+            error = output.get("error", {})
+            if not isinstance(error, dict):
+                error = {}
             return BadAgentAnswer(
-                source_node_id=source_node_id,
+                source_node_id=response.source_id,
                 agent_step_id=agent_step_id,
                 say=str(output.get("say", "")),
-                raw_action=json.dumps(output.get("raw_output", output), ensure_ascii=True, default=str),
-                reason=str(output.get("reason", "Invalid agent response.")),
+                raw_action=json.dumps(
+                    error.get(
+                        "raw_output",
+                        output.get("raw_output", output),
+                    ),
+                    ensure_ascii=True,
+                    default=str,
+                ),
+                reason=str(
+                    error.get(
+                        "reason",
+                        output.get("reason", "Invalid agent response."),
+                    )
+                ),
             )
 
-        output = response.get("output", response)
         say = output.get("say", "")
         action = self.extract_action(output)
 
@@ -141,7 +189,7 @@ class BenchmarkAgent(ABC):
                 action = json.loads(action)
             except json.JSONDecodeError:
                 return BadAgentAnswer(
-                    source_node_id=source_node_id,
+                    source_node_id=response.source_id,
                     agent_step_id=agent_step_id,
                     say=str(say),
                     raw_action=action,
@@ -152,7 +200,7 @@ class BenchmarkAgent(ABC):
             calls = self.parse_calls(action)
         except (TypeError, ValueError) as exc:
             return BadAgentAnswer(
-                source_node_id=source_node_id,
+                source_node_id=response.source_id,
                 agent_step_id=agent_step_id,
                 say=str(say),
                 raw_action=json.dumps(action, ensure_ascii=True, default=str),
@@ -160,11 +208,40 @@ class BenchmarkAgent(ABC):
             )
 
         return ValidAgentAnswer(
-            source_node_id=source_node_id,
+            source_node_id=response.source_id,
             agent_step_id=agent_step_id,
             say=str(say),
             calls=calls,
         )
+
+    def update_conversation(
+        self,
+        situation: EpisodeSituation,
+        answer: AgentAnswer,
+    ) -> EpisodeSituation:
+        """Return a snapshot containing the completed model exchange."""
+
+        updated = situation.snapshot()
+        if not answer.is_valid():
+            return updated
+
+        instruction = situation.current_instruction
+        timestamp = instruction.get_timestamp()
+        updated.history.append(
+            format_history_message(
+                instruction.get_role(),
+                instruction.get_content(),
+                timestamp,
+            )
+        )
+        updated.history.append(
+            format_model_history_message(
+                answer.get_say(),
+                answer.to_dict()["action"],
+                timestamp + 1,
+            )
+        )
+        return updated
 
     def extract_action(self, output: Dict[str, Any]) -> Any:
         return output.get("action", {})
@@ -228,41 +305,57 @@ class BenchmarkAgent(ABC):
         }
     
 
-    def get_pending_answer(self) -> List[AgentAnswer]:
+    def get_pending_results(self) -> List[BenchmarkAgentResult]:
         with self.lock:
-            out = self.completed_answers.copy()
-            self.completed_answers.clear()
+            if self.thread_exception is not None:
+                raise RuntimeError(
+                    "The benchmark-agent background thread failed"
+                ) from self.thread_exception
+            out = self.completed_results.copy()
+            self.completed_results.clear()
         return out
 
-    def add_inputs(self, inputs : Dict[int,EpisodeSituation]):
+    def add_inputs(self, inputs: Dict[int, EpisodeSituation]) -> None:
         with self.lock:
-            for idx, episode in inputs.items():
+            if self.thread_exception is not None:
+                raise RuntimeError(
+                    "Cannot add inputs after the benchmark-agent thread failed"
+                ) from self.thread_exception
+            if not self.thread_running:
+                raise RuntimeError("Cannot add inputs to a stopped benchmark agent")
+            for idx, situation in inputs.items():
                 if idx in self.waiting_inputs:
-                    raise RuntimeError("Trying to add another episode for a same id")
-                self.waiting_inputs[idx]=episode
+                    raise RuntimeError(
+                        f"Environment {idx} already waits for an agent answer"
+                    )
+                self.waiting_inputs[idx] = situation.snapshot()
 
-    def _periodic_computing_of_answers(self, interval : float = 4.0):
+    def stop(self) -> None:
+        with self.lock:
+            self.thread_running = False
+        self.thread.join(timeout=5)
+
+    def _periodic_computing_of_answers(self, interval: float = 4.0) -> None:
         try:
             while self.thread_running:
                 start_time = time.time()
-                to_do : Dict[int,EpisodeSituation] = {}
-                # Check if there is some pending inputs
+                to_do: Dict[int, EpisodeSituation] = {}
                 with self.lock:
-                    if len(self.waiting_inputs) > 0:
+                    if self.waiting_inputs:
                         to_do = self.waiting_inputs.copy()
                         self.waiting_inputs.clear()
                 
-                if len(to_do) > 0:
-                    answers = self.compute_agent_answer(to_do)
+                if to_do:
+                    results = self.compute_agent_results(to_do)
                     with self.lock:
-                        self.completed_answers.extend(answers)
+                        self.completed_results.extend(results)
 
                 elapsed = time.time() - start_time
                 sleep_time = max(0, interval - elapsed)
                 time.sleep(sleep_time)
 
-        except Exception as e:
+        except Exception as error:
             with self.lock:
-                self.thread_exception = e
+                self.thread_exception = error
         with self.lock:
             self.thread_running = False
