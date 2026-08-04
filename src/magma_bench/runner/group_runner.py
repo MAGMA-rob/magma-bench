@@ -60,6 +60,7 @@ class GroupRunner:
         status_from_env: Dict[int, ToolStatus],
         results_from_agent: List[BenchmarkAgentResult],
     ) -> BenchmarkTick:
+        self.to_release = []
         to_executor = self._answers_tick(results_from_agent)
 
         # Tool-status transitions and terminal result registration are handled
@@ -71,6 +72,14 @@ class GroupRunner:
             )
 
         to_agents = {}
+
+
+        for env_idx in self.to_release:
+            self.executor_ref.release_idx(env_idx)
+            episode_data = self.episode_data_per_env.pop(env_idx)
+            new_episode = self.group.get_episode()
+            if new_episode is not None:
+                self.executor_ref.register(new_episode)
 
         return BenchmarkTick(
             to_agents=to_agents,
@@ -97,8 +106,7 @@ class GroupRunner:
 
             episode_data.situation = result.situation
             if not answer.is_valid():
-                self.executor_ref.release_idx(env_idx)
-                self.episode_data_per_env.pop(env_idx)
+                self.to_release.append(env_idx)
                 continue
             
             episode_data.state = RunningState.RUNNING
