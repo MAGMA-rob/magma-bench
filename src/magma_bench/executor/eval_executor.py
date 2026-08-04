@@ -19,10 +19,13 @@ from magma_core.base.data_structures import (
     StageSuccess,
     ToolErrorFlag,
     ToolStatus,
-    ValidExecutionReq
+    ValidExecutionReq,
 )
+from magma_core.base.data_structures.env import build_text_only_action_failure_status
 from magma_core.base.envs import DefaultEnv
 from magma_core.base.executor import ToolsBaseExecutor
+from magma_core.base.skills import SkillExecutionContext
+from magma_core.base.skills.skill_manager import SkillAPIProvider
 from magma_core.protocol.payload.user_sim_payload import JudgePayload
 from magma_core.serialization import decode_value
 from magma_core.utils.global_utils import (
@@ -43,7 +46,7 @@ from magma_bench.data_structures import (
 )
 from magma_bench.loader import EpisodeGroup
 
-from .context import EvalEpisodeContext
+from .context import EvalEpisodeContext, EvalSkillAPIProvider
 from .episode_runtime import build_episode_task
 
 
@@ -70,6 +73,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
         self._group: Optional[EpisodeGroup] = None
         self._group_base_state: Optional[Dict] = None
         self._judge_done: Dict[int, ToolStatus] = {}
+        self._immediate_done: Dict[int, ToolStatus] = {}
         self.lock = threading.Lock()
 
     def initialize_group(
@@ -91,6 +95,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
         self._free_idx = list(range(self.nb_env))
         with self.lock:
             self._judge_done.clear()
+            self._immediate_done.clear()
 
         self.env = self._create_envs(
             scenario.environment_id,
@@ -164,11 +169,15 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                     json.dumps(initial_situation.history)
                 )
             )
+            public_attributes = decode_value(
+                copy.deepcopy(episode.semantic.visible_attributes)
+            )
+            if not isinstance(public_attributes, dict):
+                raise TypeError("Decoded semantic attributes must be a dictionary")
+            public_attributes["known_robots"] = list(task_ref.get_agent_names())
             situation = EpisodeSituation(
-                tools=decode_value(copy.deepcopy(episode.semantic.tools)),
-                attributes=decode_value(
-                    copy.deepcopy(episode.semantic.visible_attributes)
-                ),
+                tools=copy.deepcopy(randomizer.get_tools()),
+                attributes=public_attributes,
                 memory=initial_situation.memory,
                 current_instruction=task_ref.get_stage_input(0).instruction,
                 history=public_history,
@@ -201,6 +210,9 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             )
 
         self._envs.pop(env_idx)
+        with self.lock:
+            self._judge_done.pop(env_idx, None)
+            self._immediate_done.pop(env_idx, None)
         self._free_idx.append(env_idx)
         self._free_idx.sort()
 
@@ -221,15 +233,40 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                 )
 
             context.last_agent_answer = answer
+            stage_id = context.saved_data.stage_id
+            is_text_only = context.task_ref.is_stage_text_only(stage_id)
             if answer.get_say() != "":
+                if not is_text_only:
+                    self._store_local_failure(
+                        env_idx,
+                        "The agent returned a message while this stage requires an action.",
+                    )
+                    continue
                 self._submit_judge(env_idx)
                 continue
 
             calls = answer.get_tool_calls()
             if not calls:
-                raise RuntimeError(
-                    "An empty answer reached the evaluation executor"
+                self._store_local_failure(
+                    env_idx,
+                    "The agent returned neither a message nor a tool call.",
                 )
+                continue
+
+            stage = context.task_ref.stages[stage_id]
+            if is_text_only and not stage.allows_tools_before_answer():
+                canonical = build_text_only_action_failure_status(
+                    robot_names=[call.target_robot_name for call in calls],
+                    stage_id=stage_id,
+                    attributes=copy.deepcopy(context.saved_data.attributes),
+                    tool_calls=context.saved_data.tool_calls,
+                    forgiven_tool_calls=context.saved_data.forgiven_tool_calls,
+                )
+                with self.lock:
+                    self._immediate_done[env_idx] = context.randomizer.traduce_end(
+                        {env_idx: canonical}
+                    )[env_idx]
+                continue
 
             saved_data = context.saved_data
             tool_context = self._compute_tool(
@@ -266,12 +303,60 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             if context.tool_context is not None
         }
         return self.trajectory_converter.step(active_tools)
+
+    def has_active_tools(self) -> bool:
+        """Return whether a physical simulator step is currently required."""
+
+        return any(
+            context.tool_context is not None
+            for context in self._envs.values()
+        )
+
+    def get_skill_api_provider(self, env_idx: int) -> SkillAPIProvider:
+        """Build the skill API provider for the episode occupying a slot."""
+
+        context = self._envs.get(env_idx)
+        if context is None:
+            raise KeyError(f"No active episode in environment {env_idx}")
+        tools = copy.deepcopy(context.randomizer.get_tools())
+        if not isinstance(tools, list):
+            raise TypeError("Decoded semantic tools must be a list")
+        pairs = []
+        for tool in tools:
+            public_name = tool.get("name")
+            mapping = context.randomizer.tools_equivalence.get(public_name)
+            if not isinstance(mapping, dict) or not isinstance(mapping.get("name"), str):
+                raise ValueError(
+                    f"Missing canonical mapping for public tool {public_name!r}"
+                )
+            pairs.append((tool, mapping["name"]))
+        return EvalSkillAPIProvider(tuple(pairs), context.randomizer)
+
+    def get_skill_execution_context(
+        self,
+        env_idx: int,
+        public_attributes: Dict,
+    ) -> SkillExecutionContext:
+        """Expose the current counters and public state to one skill manager."""
+
+        context = self._envs.get(env_idx)
+        if context is None:
+            raise KeyError(f"No active episode in environment {env_idx}")
+        return SkillExecutionContext(
+            stage_id=context.saved_data.stage_id,
+            attributes=copy.deepcopy(public_attributes),
+            tool_calls=context.saved_data.tool_calls,
+            forgiven_tool_calls=context.saved_data.forgiven_tool_calls,
+        )
     
 
     def verif_ended_tool(self, obs: Dict) -> Dict[int, ToolStatus]:
         """Verify completed tools and advance each episode independently."""
 
         out = self._consume_judge_results()
+        with self.lock:
+            out.update(self._immediate_done)
+            self._immediate_done = {}
         completed: List[
             Tuple[int, EvalEpisodeContext, EnvToolContext, ToolStatus]
         ] = []
@@ -328,9 +413,6 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                     tool_status.stage_success,
                     tool_context.logs,
                 )
-                # catastrophic failure
-                # faut stopper la tache carrément
-
             elif tool_context.is_full_error():
                 #All tools have fail (error in processing, bad robot name, full syntax errors)
                 if tool_context.has_terminal_tool_failure():
@@ -399,12 +481,14 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
 
             saved_data.logs = tool_context.logs
             saved_data.attributes = copy.deepcopy(tool_context.attributes)
-            saved_data.tool_calls = tool_context.tool_calls
-            saved_data.forgiven_tool_calls = tool_context.forgiven_tool_calls
             if advanced_stage:
+                saved_data.tool_calls = 0
+                saved_data.forgiven_tool_calls = 0
                 saved_data.active_stage_error_state = {}
                 saved_data.composite_progress = {}
             else:
+                saved_data.tool_calls = tool_context.tool_calls
+                saved_data.forgiven_tool_calls = tool_context.forgiven_tool_calls
                 saved_data.active_stage_error_state = tool_context.error_state
                 saved_data.composite_progress = tool_context.composite_progress
             context.retry_count = 0
@@ -424,24 +508,42 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             )
 
         if retry_env_ids:
-            self._handle_tool_retry(retry_env_ids)
+            out.update(self._handle_tool_retry(retry_env_ids))
 
         return out
 
-    def _handle_tool_retry(self, env_ids: List[int]) -> None:
+    def _handle_tool_retry(self, env_ids: List[int]) -> Dict[int, ToolStatus]:
         """Restore committed states and replay answers after planner failures."""
 
         env_state = copy.deepcopy(self.env.get_state_dict())
         answers: Dict[int, ValidExecutionReq] = {}
+        failed: Dict[int, ToolStatus] = {}
         robot_names = self.trajectory_converter.agents_name
 
         for env_idx in env_ids:
             context = self._envs[env_idx]
             if context.retry_count >= 10:
-                raise RuntimeError(
-                    f"Planner error exceeded 10 retries for "
-                    f"{context.episode.episode_id}"
+                canonical = ToolStatus(
+                    robots_status=[
+                        RobotToolStatus(
+                            "",
+                            "Planner failed after 10 retries.",
+                            False,
+                            ToolErrorFlag.PLANNER_ERROR,
+                        )
+                    ],
+                    stage_id=context.saved_data.stage_id,
+                    attributes=copy.deepcopy(context.saved_data.attributes),
+                    error_descriptions=[""],
+                    failure_reason="Planner error exceeded 10 retries.",
+                    stage_success=StageSuccess.FAILED,
+                    tool_calls=context.saved_data.tool_calls,
+                    forgiven_tool_calls=context.saved_data.forgiven_tool_calls,
                 )
+                failed[env_idx] = context.randomizer.traduce_end(
+                    {env_idx: canonical}
+                )[env_idx]
+                continue
             context.retry_count += 1
             restored_state = copy.deepcopy(context.saved_data.env_state)
             current_state = extract_env_state_val(env_state, env_idx)
@@ -468,7 +570,28 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             answers[env_idx] = context.get_answer()
 
         self.env.set_state_dict(env_state)
-        self.compute_actions(answers)
+        if answers:
+            self.compute_actions(answers)
+        return failed
+
+    def _store_local_failure(self, env_idx: int, reason: str) -> None:
+        """Queue an episode-local protocol failure for the main runner."""
+
+        context = self._envs[env_idx]
+        status = ToolStatus(
+            robots_status=[],
+            stage_id=context.saved_data.stage_id,
+            attributes=copy.deepcopy(context.saved_data.attributes),
+            error_descriptions=[],
+            failure_reason=reason,
+            stage_success=StageSuccess.FAILED,
+            tool_calls=context.saved_data.tool_calls,
+            forgiven_tool_calls=context.saved_data.forgiven_tool_calls,
+        )
+        with self.lock:
+            self._immediate_done[env_idx] = context.randomizer.traduce_end(
+                {env_idx: status}
+            )[env_idx]
 
     def _submit_judge(self, env_idx: int, retry: bool = False) -> None:
         """Submit one text-only answer using its environment as identifier."""
@@ -583,6 +706,8 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                 )
                 context.saved_data.active_stage_error_state = {}
                 context.saved_data.composite_progress = {}
+                context.saved_data.tool_calls = 0
+                context.saved_data.forgiven_tool_calls = 0
 
             status.stage_state = task_ref.get_stage_state(
                 stage_id,

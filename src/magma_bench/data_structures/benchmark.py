@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Tuple, Type
 
 from magma_core.base.tools import BaseToolsAPI
+from magma_core.base.skills import BaseSkill
 
 from magma_bench.artifacts import (
     EpisodeMetadata,
@@ -41,4 +42,5 @@ class Scenario:
     track: str
     environment_id: str
     tools_cls: Type[BaseToolsAPI]
+    skill_types: Tuple[Type[BaseSkill], ...]
     episodes: Tuple[Episode, ...]

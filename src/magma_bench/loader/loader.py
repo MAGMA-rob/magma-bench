@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from magma_core.base.tools import BaseToolsAPI
+from magma_core.base.skills import BaseSkill, CancelCurrentActionSkill
 from magma_core.serialization import load_spec
 
 from magma_bench.artifacts import (
@@ -225,6 +226,24 @@ def load_scenarios(
             {"type": scenario.tools_type, "arguments": {}},
             BaseToolsAPI,
         )
+        skill_types = tuple(
+            load_spec({"type": type_name, "arguments": {}}, BaseSkill)[0]
+            for type_name in scenario.skill_types
+        )
+        if len(set(skill_types)) != len(skill_types):
+            raise ValueError(
+                f"Scenario {scenario.scenario_id!r} declares duplicate skill types"
+            )
+        skill_names = [skill_type.spec.name for skill_type in skill_types]
+        if len(set(skill_names)) != len(skill_names):
+            raise ValueError(
+                f"Scenario {scenario.scenario_id!r} declares duplicate skill names"
+            )
+        if CancelCurrentActionSkill.spec.name in skill_names:
+            raise ValueError(
+                f"Scenario {scenario.scenario_id!r} declares reserved skill name "
+                f"{CancelCurrentActionSkill.spec.name!r}"
+            )
         loaded_scenarios.append(
             Scenario(
                 scenario_id=scenario.scenario_id,
@@ -232,6 +251,7 @@ def load_scenarios(
                 track=scenario.track,
                 environment_id=scenario.environment_id,
                 tools_cls=tools_cls,
+                skill_types=skill_types,
                 episodes=tuple(episodes_by_scenario[scenario_id]),
             )
         )

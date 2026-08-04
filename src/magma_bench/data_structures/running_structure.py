@@ -1,10 +1,10 @@
 import copy
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Tuple
+from typing import Any, Dict, List, Literal, Optional, Tuple
 from enum import Enum
 
 from magma_core.base.agents import AgentAnswer
-from magma_core.base.data_structures import Instruction
+from magma_core.base.data_structures import Instruction, ToolStatus
 from magma_core.utils.data_utils import apply_att_modif
 
 
@@ -81,3 +81,16 @@ class EpisodeData:
     state: RunningState
     situation: EpisodeSituation
     env_idx: int
+    last_agent_answer: Optional[AgentAnswer] = None
+
+
+@dataclass(frozen=True)
+class EpisodeOutcome:
+    """Terminal snapshot emitted before the corresponding slot is reused."""
+
+    episode_id: str
+    env_idx: int
+    success: bool
+    failure_reason: Optional[str]
+    final_status: Optional[ToolStatus]
+    final_situation: EpisodeSituation

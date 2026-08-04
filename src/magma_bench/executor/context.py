@@ -1,8 +1,10 @@
+from copy import deepcopy
 from dataclasses import dataclass
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 from magma_core.base.data_structures import EnvToolContext, SavedEnvData, ValidExecutionReq
 from magma_core.base.randomizer import RuntimeRandomizer
+from magma_core.base.skills.skill_manager import SkillAPIProvider
 from magma_core.base.tasks import BaseTask
 
 from magma_bench.data_structures import Episode
@@ -34,3 +36,17 @@ class EvalEpisodeContext:
 
     def set_tool_context(self, tool_infos: EnvToolContext) -> None:
         self.tool_context = tool_infos
+
+
+@dataclass(frozen=True)
+class EvalSkillAPIProvider(SkillAPIProvider):
+    """Public primitive API and translator bound to one episode runtime."""
+
+    tools_with_real_names: Tuple[Tuple[Dict, str], ...]
+    randomizer: RuntimeRandomizer
+
+    def get_tools_with_real_names(self) -> List[Tuple[Dict, str]]:
+        return deepcopy(list(self.tools_with_real_names))
+
+    def get_skill_vocabulary_translator(self) -> RuntimeRandomizer:
+        return self.randomizer
