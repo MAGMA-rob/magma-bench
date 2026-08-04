@@ -222,7 +222,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
         ) -> None:
         """Transform agent answers into actions for their assigned slots."""
 
-        obs = self.env.get_obs()
+        obs = self.env.unwrapped.get_obs()
         for env_idx, answer in tools_call.items():
             context = self._envs.get(env_idx)
             if context is None:
@@ -389,7 +389,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
 
         if state_changed:
             self.env.set_state_dict(env_state)
-            obs = self.env.get_obs()
+            obs = self.env.unwrapped.get_obs()
 
         # MAIN VERIFICATION LOOP
         # Verify Goals and Logs on completed env (tool finished)

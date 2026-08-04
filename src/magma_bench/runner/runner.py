@@ -81,7 +81,7 @@ class BenchmarkRunner:
                 action = self.tool_executor.step()
                 obs, _, _, _, _ = self.tool_executor.env.step(action)
             else:
-                obs = self.tool_executor.env.get_obs()
+                obs = self.tool_executor.env.unwrapped.get_obs()
                 time.sleep(0.01)
 
             tools_ended = self.tool_executor.verif_ended_tool(obs)
