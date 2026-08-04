@@ -41,6 +41,7 @@ class BenchmarkAgent(ABC):
         agent_url: str,
         remote_agent_name: str,
         prediction_mode: str = "tool_select",
+        inference_mode: bool = False,
         timeout: float = 360,
         **args,
     ) -> None:
@@ -53,6 +54,7 @@ class BenchmarkAgent(ABC):
         self.agent_url = agent_url.rstrip("/")
         self.remote_agent_name = remote_agent_name
         self.prediction_mode = prediction_mode
+        self.inference_mode = inference_mode
         self.timeout = timeout
 
         self.lock = threading.Lock()
@@ -205,6 +207,18 @@ class BenchmarkAgent(ABC):
                 say=str(say),
                 raw_action=json.dumps(action, ensure_ascii=True, default=str),
                 reason=str(exc),
+            )
+
+        if str(say) != "" and calls:
+            return BadAgentAnswer(
+                source_node_id=response.source_id,
+                agent_step_id=agent_step_id,
+                say=str(say),
+                raw_action=json.dumps(action, ensure_ascii=True, default=str),
+                reason=(
+                    "An answer cannot contain both a user-facing message "
+                    "and tool calls."
+                ),
             )
 
         return ValidAgentAnswer(

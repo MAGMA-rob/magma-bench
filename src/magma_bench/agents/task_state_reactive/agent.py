@@ -62,6 +62,7 @@ class TaskStateReactiveBenchmarkAgent(BenchmarkAgent):
                     "completed_goals",
                     [],
                 ),
+                "inference_mode": self.inference_mode,
             }
             for env_idx, situation in batch_inputs.items()
         }

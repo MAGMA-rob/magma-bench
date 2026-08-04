@@ -43,6 +43,12 @@ def parse_args():
         type=Path,
         help="Exact result directory to create or resume.",
     )
+    parser.add_argument(
+        "--deterministic_decoding",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Request greedy inference from magma_agent (default: enabled).",
+    )
     parser.add_argument("--seed", type=int, help="The default start seed (default = 42)")
     args, unknown = parser.parse_known_args()
 

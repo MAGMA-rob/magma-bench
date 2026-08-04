@@ -43,6 +43,7 @@ class HistoryReactiveBenchmarkAgent(BenchmarkAgent):
                 "function": situation.tools,
                 "history": situation.history,
                 "prediction_mode": self.prediction_mode,
+                "inference_mode": self.inference_mode,
             }
             for env_idx, situation in batch_inputs.items()
         }

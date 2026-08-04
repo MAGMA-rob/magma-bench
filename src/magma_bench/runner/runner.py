@@ -39,6 +39,10 @@ class BenchmarkRunner:
             agent_mode_name
         ).load_agent_class()
         class_specific_args.setdefault("agent_url", magma_config.magma_agent_address)
+        class_specific_args.setdefault(
+            "inference_mode",
+            bool(benchmark_config.get("deterministic_decoding", True)),
+        )
 
         verifier_backend = None
         if not skip_backends:
