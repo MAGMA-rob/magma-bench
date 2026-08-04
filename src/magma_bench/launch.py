@@ -24,14 +24,12 @@ def parse_args():
         help="Custom config to pass to MAGMA-GEN."
     )
 
-    parser.add_argument("--logs", action="store_true", help="If specified, save per steps logs data to visualize the full conversation")
     parser.add_argument("--videos", action="store_true", help="If specified, enable the video Wrapper to see videos of the benchmark")
     parser.add_argument(
         "--verifier_backend", '-vb',
         type=str,
         help="Which backend instance to use for the verifier."
     )
-    parser.add_argument("-n", "--num_eval", type=int, help="Number of evaluation per instruction.")
     parser.add_argument(
         "--magma_agent_address", '-mas',
         type=str,
@@ -40,6 +38,11 @@ def parse_args():
     parser.add_argument("-b", "--sim_backend", type=str, help="Which simulation backend to use. Can be 'auto', 'cpu', 'gpu'")
     parser.add_argument("--shader", type=str, help="Change shader used for rendering. Default is 'default' which is very fast. Can also be 'rt' for ray tracing and generating photo-realistic renders. Can also be 'rt-fast' for a faster but lower quality ray-traced renderer")
     parser.add_argument("--save_dir", type=str, help="where to save videos, log, result of the benchmark")
+    parser.add_argument(
+        "--results_path",
+        type=Path,
+        help="Exact result directory to create or resume.",
+    )
     parser.add_argument("--seed", type=int, help="The default start seed (default = 42)")
     args, unknown = parser.parse_known_args()
 

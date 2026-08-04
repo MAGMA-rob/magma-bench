@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Literal, Optional
 
 from magma_core.base.agents import AgentAnswer, ValidAgentAnswer
 from magma_core.base.data_structures import (
@@ -8,6 +8,7 @@ from magma_core.base.data_structures import (
     StageSuccess,
     StatusReturn,
     ToolStatus,
+    ToolErrorFlag,
     ValidExecutionReq,
 )
 from magma_core.base.skills import SkillManager
@@ -16,13 +17,13 @@ from magma_core.base.skills.structure import Tick
 from magma_bench.data_structures import (
     BenchmarkAgentResult,
     EpisodeData,
-    EpisodeOutcome,
     EpisodeSituation,
     RunningState,
     Scenario,
 )
 from magma_bench.executor import ToolsEvalExecutor
 from magma_bench.loader import EpisodeGroup
+from magma_bench.results.models import EpisodeOutcome, EpisodeTerminal
 
 
 @dataclass(frozen=True)
@@ -90,12 +91,27 @@ class GroupRunner:
                 )
 
             episode_data.situation = result.situation
+            answer_payload = {
+                "valid": answer.is_valid(),
+                **answer.to_dict(),
+            }
+            stage_index = self.executor_ref.get_skill_execution_context(
+                env_idx,
+                episode_data.situation.attributes,
+            ).stage_id
+            answer_event = episode_data.record_trace(
+                stage_index,
+                "agent_answer",
+                answer_payload,
+            )
+            if answer.is_valid() and answer_payload.get("action"):
+                episode_data.last_action_event_index = answer_event.index
             if not answer.is_valid():
                 self._finish_episode(
                     env_idx,
                     success=False,
+                    terminal_status="invalid_agent_answer",
                     reason=answer.to_string(),
-                    status=None,
                 )
                 continue
 
@@ -106,8 +122,8 @@ class GroupRunner:
                     self._finish_episode(
                         env_idx,
                         success=False,
+                        terminal_status="protocol_failure",
                         reason="The agent returned neither a message nor a tool call.",
-                        status=None,
                     )
                     continue
                 internal_answer = ValidAgentAnswer(
@@ -151,29 +167,48 @@ class GroupRunner:
         episode_data.situation.tools = manager.get_api()
         self.episode_data_per_env[env_idx] = episode_data
         self.skill_managers[env_idx] = manager
-        self._queue_agent_input(env_idx)
+        self._queue_agent_input(env_idx, "instruction")
         return True
 
-    def _queue_agent_input(self, env_idx: int) -> None:
+    def _queue_agent_input(
+        self,
+        env_idx: int,
+        trace_kind: Literal["instruction", "tool_feedback"],
+    ) -> None:
         episode_data = self.episode_data_per_env[env_idx]
         episode_data.state = RunningState.WAITING_MODEL_ANSWER
+        instruction = episode_data.situation.current_instruction
+        stage_index = self.executor_ref.get_skill_execution_context(
+            env_idx,
+            episode_data.situation.attributes,
+        ).stage_id
+        episode_data.record_trace(
+            stage_index,
+            trace_kind,
+            {
+                "role": instruction.get_role(),
+                "content": instruction.get_content(),
+            },
+        )
         self.pending_agent_inputs[env_idx] = episode_data.situation
 
     def _finish_episode(
         self,
         env_idx: int,
         success: bool,
+        terminal_status: str,
         reason: Optional[str],
-        status: Optional[ToolStatus],
     ) -> None:
         episode_data = self.episode_data_per_env[env_idx]
         outcome = EpisodeOutcome(
             episode_id=episode_data.episode_id,
-            env_idx=env_idx,
             success=success,
-            failure_reason=reason,
-            final_status=status,
-            final_situation=episode_data.situation.snapshot(),
+            terminal=EpisodeTerminal(
+                status=terminal_status,
+                reason=reason,
+                last_action_event_index=episode_data.last_action_event_index,
+            ),
+            trace=list(episode_data.trace),
         )
         self.on_episode_finished(outcome)
         self.pending_agent_inputs.pop(env_idx, None)
@@ -184,30 +219,47 @@ class GroupRunner:
 
     def _handle_terminal_status(self, env_idx: int, status: ToolStatus) -> bool:
         if status.stage_success == StageSuccess.FAILED:
+            terminal_status = self._failure_terminal_status(status)
             self._finish_episode(
                 env_idx,
                 success=False,
+                terminal_status=terminal_status,
                 reason=status.failure_reason or "The stage failed.",
-                status=status,
             )
             return True
         if status.stage_state == StageState.EXCEEDED:
             self._finish_episode(
                 env_idx,
                 success=False,
+                terminal_status="budget_exceeded",
                 reason=status.failure_reason or "The stage tool-call budget was exceeded.",
-                status=status,
             )
             return True
         if status.stage_success == StageSuccess.FINISH and status.next_input is None:
             self._finish_episode(
                 env_idx,
                 success=True,
+                terminal_status="success",
                 reason=None,
-                status=status,
             )
             return True
         return False
+
+    @staticmethod
+    def _failure_terminal_status(status: ToolStatus) -> str:
+        if any(
+            robot_status.error_flag == ToolErrorFlag.PLANNER_ERROR
+            for robot_status in status.robots_status
+        ):
+            return "infrastructure_failure"
+        reason = (status.failure_reason or "").lower()
+        if (
+            "requires an action" in reason
+            or "requires a user-facing response" in reason
+            or "neither a message nor a tool call" in reason
+        ):
+            return "protocol_failure"
+        return "stage_failure"
 
     def _consume_skill_tick(
         self,
@@ -242,6 +294,7 @@ class GroupRunner:
             and not isinstance(next_input.instruction, EmptyInstruction)
         ):
             instruction = next_input.instruction
+            trace_kind = "instruction"
         else:
             status_payload = status.build_status_return(previous_answer)
             if status_payload is None:
@@ -255,6 +308,7 @@ class GroupRunner:
                     "The action failed.",
                 )
             instruction = StatusReturn(status_payload)
+            trace_kind = "tool_feedback"
 
         episode_data.situation.set_current_instruction(instruction)
-        self._queue_agent_input(env_idx)
+        self._queue_agent_input(env_idx, trace_kind)

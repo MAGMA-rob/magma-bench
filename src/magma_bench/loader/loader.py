@@ -43,10 +43,16 @@ def load_scenarios(
         raise ValueError("Duplicated scenario IDs in benchmark manifest")
 
     indexed_paths: Set[str] = set()
+    indexed_episode_ids: Set[str] = set()
     for entry in manifest.episodes:
         if entry.path in indexed_paths:
             raise ValueError(f"Duplicated episode path in benchmark index: {entry.path}")
         indexed_paths.add(entry.path)
+        if entry.episode_id in indexed_episode_ids:
+            raise ValueError(
+                f"Duplicated episode ID in benchmark index: {entry.episode_id}"
+            )
+        indexed_episode_ids.add(entry.episode_id)
 
     actual_paths = {
         str(path.relative_to(root))
@@ -200,6 +206,26 @@ def load_scenarios(
                 f"Episode index identity mismatch for {entry.path}: "
                 f"expected={expected_identity}, got={actual_identity}"
             )
+        if (
+            episode_model.metadata.number_of_interventions
+            != len(episode_model.interventions)
+            or len(episode_model.metadata.intervention_lags)
+            != len(episode_model.interventions)
+        ):
+            raise ValueError(
+                f"Intervention metadata mismatch for {episode_model.episode_id!r}"
+            )
+        if episode_model.condition == "mission_update":
+            measurable_lags = [
+                lag
+                for lag in episode_model.metadata.intervention_lags
+                if lag is not None
+            ]
+            if len(measurable_lags) != 1:
+                raise ValueError(
+                    f"Mission-update episode {episode_model.episode_id!r} must "
+                    "define exactly one non-null intervention lag"
+                )
 
         episodes_by_scenario[entry.scenario_id].append(
             Episode(
@@ -216,6 +242,29 @@ def load_scenarios(
                 metadata=episode_model.metadata,
             )
         )
+
+    loaded_episodes = {
+        episode.episode_id: (scenario_id, episode)
+        for scenario_id, episodes in episodes_by_scenario.items()
+        for episode in episodes
+    }
+    for scenario_id, episode in loaded_episodes.values():
+        control_binding = loaded_episodes.get(episode.metadata.control_episode_id)
+        if control_binding is None:
+            raise ValueError(
+                f"Episode {episode.episode_id!r} references unknown control "
+                f"{episode.metadata.control_episode_id!r}"
+            )
+        control_scenario_id, control = control_binding
+        if (
+            control_scenario_id != scenario_id
+            or control.condition != "clean"
+            or control.skeleton_id != episode.skeleton_id
+            or control.semantic.semantic_id != episode.semantic.semantic_id
+        ):
+            raise ValueError(
+                f"Invalid clean pairing for episode {episode.episode_id!r}"
+            )
 
     loaded_scenarios: List[Scenario] = []
     for scenario_id in manifest.scenarios:

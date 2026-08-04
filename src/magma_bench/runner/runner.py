@@ -1,6 +1,7 @@
 import time
+from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Type, Union
+from typing import Dict, List, Optional, Type, Union
 
 from tqdm import tqdm
 
@@ -8,9 +9,11 @@ from magma_core.configs.config import MAGMAConfig
 from magma_core.workers import LMWorker
 
 from magma_bench.agents import BenchmarkAgent, get_agent_mode
-from magma_bench.data_structures import EpisodeOutcome, Scenario
+from magma_bench.data_structures import Scenario
 from magma_bench.executor import ToolsEvalExecutor
 from magma_bench.loader import load_groups_from_config, load_scenarios
+from magma_bench.results.manager import ResultManager
+from magma_bench.results.models import EpisodeOutcome
 
 from .group_runner import GroupRunner
 import magma_scenarios.envs # to load gym envs
@@ -24,7 +27,6 @@ class BenchmarkRunner:
         magma_config: MAGMAConfig,
         class_specific_args: Dict,
         skip_backends: bool = False,
-        on_episode_finished: Optional[Callable[[EpisodeOutcome], None]] = None,
     ) -> None:
         benchmark_config = magma_config.benchmark
         self._skip_backends = skip_backends
@@ -48,7 +50,9 @@ class BenchmarkRunner:
 
         self.agent = agent_class(**class_specific_args)
         self._scenarios: List[Scenario] = []
-        self._on_episode_finished = on_episode_finished
+        self._benchmark_root: Optional[Path] = None
+        self._benchmark_config = benchmark_config
+        self.result_manager: Optional[ResultManager] = None
         worker = None if skip_backends else LMWorker(verifier_backend)
         self.tool_executor = ToolsEvalExecutor(
             magma_config.magma_planner_address,
@@ -68,12 +72,34 @@ class BenchmarkRunner:
                 "A compiled benchmark root is required. Pass the directory "
                 "produced by magma-bench-build."
             )
-        self._scenarios = load_scenarios(Path(benchmark_root), scenarios)
+        self._benchmark_root = Path(benchmark_root).resolve()
+        self._scenarios = load_scenarios(self._benchmark_root, scenarios)
         return True
 
     def _record_episode_outcome(self, outcome: EpisodeOutcome) -> None:
-        if self._on_episode_finished is not None:
-            self._on_episode_finished(outcome)
+        if self.result_manager is None:
+            raise RuntimeError("ResultManager has not been initialized")
+        self.result_manager.record_episode(outcome)
+
+    def _build_result_manager(self) -> ResultManager:
+        if self._benchmark_root is None:
+            raise RuntimeError("Benchmark root is not available")
+        configured_path = self._benchmark_config.get("results_path")
+        if configured_path is None:
+            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            results_path = (
+                Path(self._benchmark_config.get("save_dir", "eval"))
+                / self.agent.agent_name
+                / timestamp
+            )
+        else:
+            results_path = Path(configured_path)
+        return ResultManager(
+            results_path=results_path,
+            benchmark_root=self._benchmark_root,
+            agent_card=self.agent.get_agent_card(),
+            scenarios=self._scenarios,
+        )
 
     def _run_group(self, group: GroupRunner) -> None:
         while not group.is_done():
@@ -101,10 +127,12 @@ class BenchmarkRunner:
                 "There is no benchmark loaded. Please use load_benchmark() before run()."
             )
         selected_task_indices = getattr(args, "task_indices", None)
-        if selected_task_indices is not None and len(self._scenarios) != 1:
-            raise ValueError(
-                "task_indices can only be used when executing exactly one scenario."
+        if selected_task_indices is not None:
+            raise NotImplementedError(
+                "Subset execution is not implemented for compiled benchmarks"
             )
+
+        self.result_manager = self._build_result_manager()
 
         try:
             for scenario in tqdm(
@@ -113,6 +141,8 @@ class BenchmarkRunner:
                 position=0,
                 leave=True,
             ):
+                if not self.result_manager.start_scenario(scenario):
+                    continue
                 for episode_group in load_groups_from_config(scenario):
                     group_runner = GroupRunner(
                         scenario,
@@ -121,5 +151,7 @@ class BenchmarkRunner:
                         self._record_episode_outcome,
                     )
                     self._run_group(group_runner)
+                self.result_manager.finish_scenario(scenario)
+            self.result_manager.finish_benchmark()
         finally:
             self.agent.stop()

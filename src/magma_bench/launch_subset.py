@@ -45,7 +45,6 @@ def parse_args():
         type=str,
         help="Which backend instance to use for the verifier.",
     )
-    parser.add_argument("-n", "--num_eval", type=int, help="Number of evaluation per instruction.")
     parser.add_argument(
         "--magma_agent_address", "-mas",
         type=str,
@@ -85,7 +84,6 @@ def main(args: argparse.Namespace):
     override_dict["benchmark"].pop("task_indices", None)
     override_dict["benchmark"].pop("no_metrics", None)
     override_dict["benchmark"].pop("skip_judge", None)
-    override_dict["benchmark"]["logs"] = True
 
     default_path = resolve_config_path(args.config_path)
     magma_config = MAGMAConfig.load(default_path, accept_no_backend=args.skip_judge)

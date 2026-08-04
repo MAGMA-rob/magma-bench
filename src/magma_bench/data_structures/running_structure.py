@@ -4,8 +4,10 @@ from typing import Any, Dict, List, Literal, Optional, Tuple
 from enum import Enum
 
 from magma_core.base.agents import AgentAnswer
-from magma_core.base.data_structures import Instruction, ToolStatus
+from magma_core.base.data_structures import Instruction
 from magma_core.utils.data_utils import apply_att_modif
+
+from magma_bench.results.models import TraceEvent
 
 
 @dataclass
@@ -82,15 +84,22 @@ class EpisodeData:
     situation: EpisodeSituation
     env_idx: int
     last_agent_answer: Optional[AgentAnswer] = None
+    trace: List[TraceEvent] = field(default_factory=list)
+    next_trace_index: int = 0
+    last_action_event_index: Optional[int] = None
 
-
-@dataclass(frozen=True)
-class EpisodeOutcome:
-    """Terminal snapshot emitted before the corresponding slot is reused."""
-
-    episode_id: str
-    env_idx: int
-    success: bool
-    failure_reason: Optional[str]
-    final_status: Optional[ToolStatus]
-    final_situation: EpisodeSituation
+    def record_trace(
+        self,
+        stage_index: int,
+        kind: Literal["instruction", "agent_answer", "tool_feedback"],
+        payload: Dict[str, Any],
+    ) -> TraceEvent:
+        event = TraceEvent(
+            index=self.next_trace_index,
+            stage_index=stage_index,
+            kind=kind,
+            payload=copy.deepcopy(payload),
+        )
+        self.trace.append(event)
+        self.next_trace_index += 1
+        return event
