@@ -1,299 +1,293 @@
+import importlib
+import json
 import sys
 import types
-import json
 from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
+from pydantic import BaseModel
 
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "magma-bench-dev" / "src"))
-sys.path.insert(0, str(ROOT / "magma-scenarios-dev" / "src"))
 
-benchmark_module = types.ModuleType("magma_scenarios.benchmark")
-benchmark_module.KNOWN_CRITERIA = ["multi-steps", "c-reasoning", "lg-memorization", "recovery"]
-benchmark_module.LENGTH_GROUPS = {
-    "2-3": (2, 3),
-    "4-5": (4, 5),
-    "6-9": (6, 9),
-    "10-16": (10, 16),
-}
-sys.modules["magma_scenarios"] = types.ModuleType("magma_scenarios")
-sys.modules["magma_scenarios.benchmark"] = benchmark_module
-
-from magma_bench.results import ResultManager, ScenarioResult, StageResult
-from magma_bench.results.metrics import compute_benchmark_metrics
+from magma_bench.results.metrics import compute_metrics
+from magma_bench.results.models import (
+    EpisodeOutcome,
+    EpisodeResult,
+    EpisodeTerminal,
+    TraceEvent,
+)
 
 
-def _make_task(task_id, horizon, bucket):
-    return SimpleNamespace(
-        id=task_id,
-        criteria=["c-reasoning", "lg-memorization", "multi-steps", "recovery"],
-        task_horizon=horizon,
-        length_bucket=bucket,
+CONDITIONS = (
+    "clean",
+    "mission_update",
+    "interruption",
+    "noise",
+    "execution_error",
+    "combined",
+)
+
+
+def _build_fixture():
+    bindings = []
+    results = {}
+    clean_success = {
+        ("skeleton_a", "semantic_0"): True,
+        ("skeleton_a", "semantic_1"): False,
+        ("skeleton_b", "semantic_0"): True,
+        ("skeleton_b", "semantic_1"): True,
+    }
+    update_success = {
+        ("skeleton_a", "semantic_0"): True,
+        ("skeleton_a", "semantic_1"): True,
+        ("skeleton_b", "semantic_0"): False,
+        ("skeleton_b", "semantic_1"): True,
+    }
+
+    for skeleton_id in ("skeleton_a", "skeleton_b"):
+        for semantic_id in ("semantic_0", "semantic_1"):
+            control_id = f"{skeleton_id}.{semantic_id}.clean"
+            for condition in CONDITIONS:
+                episode_id = f"{skeleton_id}.{semantic_id}.{condition}"
+                lag = 2 if skeleton_id == "skeleton_a" else 12
+                intervention_lags = (
+                    []
+                    if condition == "clean"
+                    else ([lag] if condition == "mission_update" else [None])
+                )
+                episode = SimpleNamespace(
+                    episode_id=episode_id,
+                    skeleton_id=skeleton_id,
+                    condition=condition,
+                    semantic=SimpleNamespace(semantic_id=semantic_id),
+                    metadata=SimpleNamespace(
+                        control_episode_id=control_id,
+                        length_bucket=(
+                            "short" if skeleton_id == "skeleton_a" else "long"
+                        ),
+                        intervention_lags=intervention_lags,
+                    ),
+                )
+                if condition == "clean":
+                    success = clean_success[(skeleton_id, semantic_id)]
+                elif condition == "mission_update":
+                    success = update_success[(skeleton_id, semantic_id)]
+                else:
+                    success = True
+                bindings.append(("scenario_a", episode))
+                results[episode_id] = EpisodeResult(
+                    episode_id=episode_id,
+                    success=success,
+                    terminal=EpisodeTerminal(
+                        status="success" if success else "stage_failure"
+                    ),
+                    trace=[],
+                )
+    return bindings, results
+
+
+def test_metrics_compute_paired_rates_lengths_and_lags():
+    bindings, results = _build_fixture()
+
+    metrics = compute_metrics(bindings, results)
+
+    assert metrics.counts.scenario_count == 1
+    assert metrics.counts.skeleton_count == 2
+    assert metrics.counts.semantic_unit_count == 4
+    assert metrics.counts.episode_count == 24
+    assert metrics.clean_success_rate.value == 0.75
+    assert metrics.success_rate_by_condition["mission_update"].value == 0.75
+    assert (
+        metrics.conditional_robustness_by_condition["mission_update"].value
+        == pytest.approx(2 / 3)
     )
+    assert metrics.success_rate_by_length["short"].clean_success_rate.value == 0.5
+    assert metrics.success_rate_by_length["long"].clean_success_rate.value == 1.0
+    assert metrics.mission_update_retention_by_lag["0-3"].value == 1.0
+    assert metrics.mission_update_retention_by_lag["10-19"].value == 0.5
+    assert metrics.mission_update_retention_by_lag["4-9"].value is None
+    assert metrics.mission_update_retention_by_lag["4-9"].denominator == 0
 
 
-def _make_stage(stage_id, horizon, keys=None, recovery=False):
-    return SimpleNamespace(
-        id=stage_id,
-        stage_horizon=horizon,
-        keys_evaluator=keys or [],
-        has_flag_recovery=lambda: recovery,
-        has_flag_failure=lambda: False,
+def test_metrics_reject_missing_pairs_and_ambiguous_update_lag():
+    bindings, results = _build_fixture()
+    results.pop("skeleton_a.semantic_0.clean")
+    with pytest.raises(ValueError, match="result set mismatch"):
+        compute_metrics(bindings, results)
+
+    bindings, results = _build_fixture()
+    _, update = next(
+        binding
+        for binding in bindings
+        if binding[1].episode_id == "skeleton_a.semantic_0.mission_update"
     )
+    update.metadata.intervention_lags = [2, 8]
+    with pytest.raises(ValueError, match="exactly one non-null"):
+        compute_metrics(bindings, results)
 
 
-def _make_stage_result(success, executions=None):
-    result = StageResult()
-    result.success = success
-    result.executions_result = [True] if executions is None else executions
-    result.conversation = [
-        {"author": "user", "content": "instruction"},
-        {
-            "author": "model",
-            "content": {
-                "say": "I am doing it." if success else "I failed.",
-                "action": {},
-            },
+def test_episode_models_are_strict_and_preserve_last_action_reference():
+    action = TraceEvent(
+        index=1,
+        stage_index=0,
+        kind="agent_answer",
+        payload={
+            "valid": True,
+            "say": "",
+            "action": {"robot": {"name": "pick", "arguments": {}}},
         },
-        {
-            "author": "status",
-            "content": (
-                {
-                    "infos": "Tool succeeded.",
-                    "previous_tool_call": {"name": "pick", "arguments": {"item": "box"}},
-                }
-                if success
-                else {
-                    "error": "Tool failed.",
-                    "previous_tool_call": {"name": "pick", "arguments": {"item": "box"}},
-                }
+    )
+    result = EpisodeResult(
+        episode_id="episode_1",
+        success=False,
+        terminal=EpisodeTerminal(
+            status="stage_failure",
+            reason="pick failed",
+            last_action_event_index=action.index,
+        ),
+        trace=[
+            TraceEvent(
+                index=0,
+                stage_index=0,
+                kind="instruction",
+                payload={"role": "user", "content": "Pick it"},
             ),
-        },
-    ]
-    result.explanation = "ok" if success else "failed"
-    return result
-
-
-def test_goal_completion_uses_task_horizon_and_length_buckets():
-    scenario_result = ScenarioResult("scenario_a")
-
-    short_task = _make_task("task_short", 4, "4-5")
-    long_task = _make_task("task_long", 16, "10-16")
-
-    scenario_result.record_stage(short_task, _make_stage("s0", 2), _make_stage_result(True))
-    scenario_result.record_stage(short_task, _make_stage("s1", 2), _make_stage_result(False))
-
-    scenario_result.record_stage(long_task, _make_stage("l0", 6), _make_stage_result(True))
-    scenario_result.record_stage(long_task, _make_stage("l1", 10), _make_stage_result(False))
-
-    metrics = scenario_result.compute_result()
-
-    assert metrics.goal_completion_macro == 43.75
-    assert metrics.goal_completion_micro == 40.0
-    assert metrics.length_breakdown["4-5"].to_dict()["primary_metrics"]["goal_completion_macro"] == 50.0
-    assert metrics.length_breakdown["10-16"].to_dict()["primary_metrics"]["goal_completion_macro"] == 37.5
-
-
-def test_skip_counts_as_eligible_but_not_reached():
-    scenario_result = ScenarioResult("scenario_skip")
-    task = _make_task("task_skip", 3, "2-3")
-
-    scenario_result.record_skip(task, _make_stage("s0", 1, keys=["lg-memorization"]), "unresolved_instruction")
-    metrics = scenario_result.compute_result()
-
-    lg_memory = metrics.secondary_metrics["lg-memorization"].to_dict()
-    assert lg_memory["eligible"] == 1
-    assert lg_memory["reached"] == 0
-    assert lg_memory["success"] == 0
-    assert lg_memory["reach_rate"] == 0.0
-    assert lg_memory["success_when_reached"] == "non-measured"
-
-
-def test_secondary_metrics_continue_after_first_failure():
-    scenario_result = ScenarioResult("scenario_secondary")
-    task = _make_task("task_secondary", 3, "2-3")
-
-    scenario_result.record_stage(
-        task,
-        _make_stage("s0", 1, keys=["c-reasoning"]),
-        _make_stage_result(False),
-    )
-    scenario_result.record_stage(
-        task,
-        _make_stage("s1", 2, keys=["lg-memorization"]),
-        _make_stage_result(True),
+            action,
+        ],
     )
 
-    metrics = scenario_result.compute_result()
-
-    assert metrics.goal_completion_micro == 0.0
-    constraint = metrics.secondary_metrics["c-reasoning"].to_dict()
-    memory = metrics.secondary_metrics["lg-memorization"].to_dict()
-    assert constraint["success"] == 0
-    assert memory["reached"] == 1
-    assert memory["success"] == 1
-    assert memory["success_when_reached"] == 100.0
+    decoded = EpisodeResult.model_validate_json(result.model_dump_json())
+    assert decoded.terminal.last_action_event_index == 1
+    assert decoded.trace[1].payload["action"]["robot"]["name"] == "pick"
+    with pytest.raises(Exception):
+        EpisodeResult.model_validate({**result.model_dump(), "unused": True})
 
 
-def test_recovery_is_measured_automatically():
-    scenario_result = ScenarioResult("scenario_recovery")
-    task = _make_task("task_recovery", 2, "2-3")
+def _load_result_manager():
+    previous_artifacts = sys.modules.get("magma_bench.artifacts")
+    previous_data = sys.modules.get("magma_bench.data_structures")
 
-    scenario_result.record_stage(
-        task,
-        _make_stage("s0", 2, recovery=True),
-        _make_stage_result(True),
+    class BenchmarkManifest(BaseModel):
+        benchmark_version: str
+        scenarios: list[str] = []
+        episodes: list = []
+
+    artifacts = types.ModuleType("magma_bench.artifacts")
+    artifacts.BenchmarkManifest = BenchmarkManifest
+    artifacts.load_json_model = lambda path, _model: BenchmarkManifest.model_validate_json(
+        path.read_text(encoding="utf-8")
     )
-
-    metrics = scenario_result.compute_result()
-    recovery = metrics.secondary_metrics["recovery"].to_dict()
-    assert recovery["eligible"] == 1
-    assert recovery["reached"] == 1
-    assert recovery["success"] == 1
-    assert recovery["success_when_reached"] == 100.0
-
-
-def test_benchmark_metrics_use_raw_counts_not_mean_of_means():
-    scenario_a = ScenarioResult("scenario_a")
-    scenario_b = ScenarioResult("scenario_b")
-
-    task_a = _make_task("task_a", 4, "4-5")
-    task_b = _make_task("task_b", 16, "10-16")
-
-    scenario_a.record_stage(task_a, _make_stage("a0", 2), _make_stage_result(True))
-    scenario_a.record_stage(task_a, _make_stage("a1", 2), _make_stage_result(False))
-
-    scenario_b.record_stage(task_b, _make_stage("b0", 16), _make_stage_result(True))
-
-    scenario_a.compute_result()
-    scenario_b.compute_result()
-
-    benchmark = compute_benchmark_metrics(
-        {
-            "scenario_a": [scenario_a],
-            "scenario_b": [scenario_b],
-        }
-    )
-
-    assert benchmark.summary.goal_completion_macro == 75.0
-    assert benchmark.summary.goal_completion_micro == 90.0
-
-
-def test_task_log_exports_eagerly_and_final_export_does_not_rewrite_it(tmp_path):
-    manager = ResultManager(str(tmp_path), per_task_log=True)
+    data_structures = types.ModuleType("magma_bench.data_structures")
+    data_structures.Episode = object
+    data_structures.Scenario = object
+    sys.modules["magma_bench.artifacts"] = artifacts
+    sys.modules["magma_bench.data_structures"] = data_structures
+    sys.modules.pop("magma_bench.results.manager", None)
     try:
-        scenario_result = ScenarioResult(
-            "scenario_export",
-            ["c-reasoning"],
-            try_number=2,
-            randomization_info={
-                "enabled": True,
-                "variation_index": 1,
-                "attributes": {"objects": ["alpha", "beta"]},
-                "tools": [
-                    {
-                        "name": "press",
-                        "description": "Press one object.",
-                        "parameter_names": ["target"],
-                    }
-                ],
-            },
-        )
-        task = _make_task("task_export", 4, "4-5")
-
-        scenario_result.record_stage(
-            task,
-            _make_stage("s0", 2, keys=["c-reasoning"]),
-            _make_stage_result(True),
-        )
-        scenario_result.record_stage(
-            task,
-            _make_stage("s1", 2),
-            _make_stage_result(False),
-        )
-
-        try_path = Path(
-            manager.get_try_output_path(scenario_result.scenario_id, scenario_result.try_number)
-        )
-        log_path = try_path / "logs" / "task_export.json"
-        try_score_path = try_path / "try_score.json"
-
-        scenario_result.export_task_log(task, str(try_path))
-
-        payload = json.loads(log_path.read_text())
-        assert set(payload.keys()) == {"header", "stage"}
-        assert payload["header"] == {
-            "task_success": False,
-            "goal_completion": 50.0,
-            "secondary_metrics": {
-                "c-reasoning": "1 / 1",
-                "lg-memorization": "0 / 0",
-                "multi-steps": "0 / 0",
-                "recovery": "0 / 0",
-            },
-        }
-        assert payload["stage"] == [
-            {
-                "success": True,
-                "verification_log": "ok",
-                "conversation": [
-                    {"author": "user", "content": "instruction"},
-                    {"author": "model", "content": {"say": "I am doing it.", "action": {}}},
-                    {"author": "status", "content": "Tool succeeded."},
-                ],
-            },
-            {
-                "success": False,
-                "verification_log": "failed",
-                "conversation": [
-                    {"author": "user", "content": "instruction"},
-                    {"author": "model", "content": {"say": "I failed.", "action": {}}},
-                    {"author": "status", "content": "Tool failed."},
-                ],
-            },
-        ]
-        assert not try_score_path.exists()
-
-        log_path.write_text('{"sentinel": true}')
-
-        scenario_result.compute_result()
-        scenario_result.export(str(try_path))
-
-        assert json.loads(log_path.read_text()) == {"sentinel": True}
-        try_score = json.loads(try_score_path.read_text())
-        assert try_score["counts"]["task_count"] == 1
-        assert try_score["counts"]["completed_prefix_horizon"] == 2
-        assert try_score["randomization"] == {
-            "enabled": True,
-            "variation_index": 1,
-            "attributes": {"objects": ["alpha", "beta"]},
-            "tools": [
-                {
-                    "name": "press",
-                    "description": "Press one object.",
-                    "parameter_names": ["target"],
-                }
-            ],
-        }
+        return importlib.import_module("magma_bench.results.manager").ResultManager
     finally:
-        manager.stop()
+        if previous_artifacts is None:
+            sys.modules.pop("magma_bench.artifacts", None)
+        else:
+            sys.modules["magma_bench.artifacts"] = previous_artifacts
+        if previous_data is None:
+            sys.modules.pop("magma_bench.data_structures", None)
+        else:
+            sys.modules["magma_bench.data_structures"] = previous_data
 
 
-def test_result_manager_exports_scenario_score_to_try_number_without_logs(tmp_path):
-    manager = ResultManager(str(tmp_path), per_task_log=False)
-    scenario_result = ScenarioResult("scenario_manager", ["c-reasoning"], try_number=3)
-    task = _make_task("task_manager", 2, "2-3")
+ResultManager = _load_result_manager()
 
-    scenario_result.record_stage(
-        task,
-        _make_stage("s0", 2, keys=["c-reasoning"]),
-        _make_stage_result(True),
+
+def _manager_fixture(tmp_path):
+    benchmark_root = tmp_path / "benchmark"
+    benchmark_root.mkdir()
+    (benchmark_root / "benchmark.json").write_text(
+        json.dumps({"benchmark_version": "test-v1"}),
+        encoding="utf-8",
+    )
+    bindings, _ = _build_fixture()
+    episodes = tuple(episode for _, episode in bindings)
+    scenario = SimpleNamespace(
+        scenario_id="scenario_a",
+        track="in_domain",
+        episodes=episodes,
+    )
+    agent = {
+        "agent": "test-agent",
+        "remote_agent": "history_reactive",
+        "prediction_mode": "tool_select",
+        "agent_url": "http://ignored",
+    }
+    return benchmark_root, scenario, agent
+
+
+def _outcome(episode_id, success=True, status=None):
+    return EpisodeOutcome(
+        episode_id=episode_id,
+        success=success,
+        terminal=EpisodeTerminal(
+            status=status or ("success" if success else "stage_failure")
+        ),
+        trace=[],
     )
 
-    manager.push_scenario_result(scenario_result)
-    manager.stop()
 
-    try_path = tmp_path / "scenario_manager" / "try-3"
-    assert (try_path / "try_score.json").exists()
-    assert not (try_path / "logs").exists()
+def test_result_manager_saves_scenario_and_resumes(tmp_path):
+    benchmark_root, scenario, agent = _manager_fixture(tmp_path)
+    results_path = tmp_path / "results"
+    manager = ResultManager(results_path, benchmark_root, agent, [scenario])
+    assert manager.start_scenario(scenario) is True
+    for episode in scenario.episodes:
+        manager.record_episode(_outcome(episode.episode_id))
+    scenario_result = manager.finish_scenario(scenario)
+    benchmark_result = manager.finish_benchmark()
+
+    assert scenario_result.metrics.clean_success_rate.value == 1.0
+    assert benchmark_result.metrics.counts.episode_count == 24
+    assert (results_path / "result.json").is_file()
+    assert (results_path / "scenarios" / "scenario_a" / "result.json").is_file()
+
+    resumed = ResultManager(results_path, benchmark_root, agent, [scenario])
+    assert resumed.start_scenario(scenario) is False
+    resumed.finish_benchmark()
+
+
+def test_result_manager_replays_partial_and_rejects_incompatible_agent(tmp_path):
+    benchmark_root, scenario, agent = _manager_fixture(tmp_path)
+    results_path = tmp_path / "results"
+    manager = ResultManager(results_path, benchmark_root, agent, [scenario])
+    assert manager.start_scenario(scenario) is True
+    manager.record_episode(_outcome(scenario.episodes[0].episode_id))
+
+    resumed = ResultManager(results_path, benchmark_root, agent, [scenario])
+    assert resumed.start_scenario(scenario) is True
+    partial_episodes = results_path / "scenarios" / ".partial" / "scenario_a" / "episodes"
+    assert list(partial_episodes.iterdir()) == []
+
+    incompatible = dict(agent)
+    incompatible["agent"] = "another-agent"
+    with pytest.raises(ValueError, match="incompatible"):
+        ResultManager(results_path, benchmark_root, incompatible, [scenario])
+
+
+def test_result_manager_keeps_infrastructure_failure_partial(tmp_path):
+    benchmark_root, scenario, agent = _manager_fixture(tmp_path)
+    manager = ResultManager(tmp_path / "results", benchmark_root, agent, [scenario])
+    manager.start_scenario(scenario)
+    for index, episode in enumerate(scenario.episodes):
+        manager.record_episode(
+            _outcome(
+                episode.episode_id,
+                success=index != 0,
+                status="infrastructure_failure" if index == 0 else "success",
+            )
+        )
+    with pytest.raises(RuntimeError, match="infrastructure failures"):
+        manager.finish_scenario(scenario)
+    assert (
+        tmp_path / "results" / "scenarios" / ".partial" / "scenario_a"
+    ).is_dir()

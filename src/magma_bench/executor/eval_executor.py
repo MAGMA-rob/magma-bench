@@ -1,441 +1,734 @@
 # SPDX-License-Identifier: BSD-2-Clause
 # Copyright (c) 2026, Loan Bernat
 
-from typing import Dict, List, Union, Optional, Tuple, Any
-from collections import OrderedDict
-from dataclasses import dataclass
-from magma_core.base.tasks.base_task import BaseTask
-import copy
-import torch, json
-from mani_skill.utils.wrappers.record import RecordEpisode
+"""Vectorized benchmark executor with one task runtime per active episode."""
 
+from collections import OrderedDict
+from concurrent.futures import Future
+import copy
+import json
+import threading
+from typing import Dict, List, Optional, Tuple, Union
+
+import torch
+
+from magma_core.base.data_structures import (
+    EnvToolContext,
+    RobotToolStatus,
+    SavedEnvData,
+    StageSuccess,
+    ToolErrorFlag,
+    ToolStatus,
+    ValidExecutionReq,
+)
+from magma_core.base.data_structures.env import build_text_only_action_failure_status
 from magma_core.base.envs import DefaultEnv
 from magma_core.base.executor import ToolsBaseExecutor
-from magma_core.base.data_structures import ToolInfos, Log, ActiveStageErrorState, ToolErrorFlag
-from magma_core.workers import LMWorker
+from magma_core.base.skills import SkillExecutionContext
+from magma_core.base.skills.skill_manager import SkillAPIProvider
 from magma_core.protocol.payload.user_sim_payload import JudgePayload
+from magma_core.serialization import decode_value
 from magma_core.utils.global_utils import (
+    apply_env_state_updates,
     batch_set_value,
     extract_env_state_val,
     merge_robot_articulations,
 )
+from magma_core.workers import LMWorker
 
-@dataclass
-class SavedEnvState:
-    """Dataclass to store saved information"""
-    env_state: Dict
-    tool_call : Dict
+from magma_bench.artifacts import deserialize_runtime_randomizer
+from magma_bench.data_structures import (
+    Episode,
+    EpisodeData,
+    EpisodeSituation,
+    RunningState,
+    Scenario,
+)
+from magma_bench.loader import EpisodeGroup
+
+from .context import EvalEpisodeContext, EvalSkillAPIProvider
+from .episode_runtime import build_episode_task
+
 
 class ToolsEvalExecutor(ToolsBaseExecutor):
-    """
-    Tools executor is the main class responsible for transforming LLM calls into actions using specific defined class.
-    """
+    """Execute independent benchmark episodes in shared simulator slots."""
 
-    # Only for Evaluation Mode
-    _eval_envs : Dict[int,ToolInfos]
-    _precedent_env_state : Dict[int, SavedEnvState]
+    _envs : Dict[int, EvalEpisodeContext]
+
 
     def __init__(
             self,
-            planner_endpoint : str,
-            worker : LMWorker,
-            nb_env : int = 1,
-            randomize_variation : int = 0,
-        ):
-        if randomize_variation == 1:
-            # That's mean that we have no randomization (like just one env)
-            # So we set to 0 to deactivate randomization
-            randomize_variation = 0
-        
+            planner_endpoint: str,
+            worker: Optional[LMWorker],
+            nb_env: int = 1,
+        ) -> None:
         super().__init__(
             nb_env,
             planner_endpoint=planner_endpoint,
             ollama_worker=worker,
-            nb_randomization=randomize_variation
         )
+        self._envs = {}
+        self._free_idx = list(range(nb_env))
+        self._scenario: Optional[Scenario] = None
+        self._group: Optional[EpisodeGroup] = None
+        self._group_base_state: Optional[Dict] = None
+        self._judge_done: Dict[int, ToolStatus] = {}
+        self._immediate_done: Dict[int, ToolStatus] = {}
+        self.lock = threading.Lock()
 
-        self._eval_envs : Dict[int,ToolInfos] = {}
-        self._precedent_env_state = {}
-        self._task_env_options_override: Dict[str, Any] = {}
-   
-    ################ public function
+    def initialize_group(
+            self,
+            scenario: Scenario,
+            group: EpisodeGroup,
+            obs_mode: str = "state_dict",
+            sim_backend: str = "auto",
+        ) -> DefaultEnv:
+        """Initialize the simulator configuration shared by an episode group."""
 
-    def set_randomizer_index(self, id : int):
-        if self.randomized:
-            self.randomizer.set_variation_index(id)
-
-    def set_task_env_options(self, env_options: Optional[Dict[str, Any]]) -> None:
-        if env_options is None:
-            self._task_env_options_override = {}
-            return
-        if not isinstance(env_options, dict):
-            raise TypeError(f"Task env_options must be a dict. Got {type(env_options)}.")
-        self._task_env_options_override = copy.deepcopy(env_options)
-
-    def get_env_options(self, stage_id: Optional[int] = None) -> Dict:
-        env_options = copy.deepcopy(super().get_env_options(stage_id))
-        env_options.update(copy.deepcopy(self._task_env_options_override))
-        return env_options
-
-    def initialize(self, task_ref: BaseTask, build_first_stage: bool = True, obs_mode: str = "state_dict", video_path : str = "none") -> DefaultEnv:
-        self.set_task_env_options(None)
-        self.env = super().initialize(task_ref, build_first_stage, obs_mode)
-        if video_path != "none":
-            self.env = RecordEpisode(
-                    self.env,
-                    output_dir=video_path,
-                    save_trajectory=False,
-                    save_video=True,
-                    source_type="MAGMA-BENCHMARK",
-                    source_desc=f"Videos of the execution on {task_ref.name} benchmark",
-                    video_fps=30,
-                    save_on_reset=False
+        if self._envs:
+            raise RuntimeError(
+                "Cannot initialize a new episode group while slots are active"
             )
+
+        self._scenario = scenario
+        self._group = group
+        self._free_idx = list(range(self.nb_env))
+        with self.lock:
+            self._judge_done.clear()
+            self._immediate_done.clear()
+
+        self.env = self._create_envs(
+            scenario.environment_id,
+            group.env_options,
+            group.planner_options,
+            obs_mode,
+            sim_backend,
+        )
+        self._group_base_state = copy.deepcopy(self.env.get_state_dict())
         return self.env
 
-    def log_reset(self):
-        """
-        Benchmark only.
+    def register(self, episode: Episode) -> EpisodeData:
+        """Create and bind one episode runtime to the next free environment."""
 
-        Reset all logs for all env.
-        """
-        for tool_info in self._eval_envs.values():
-            tool_info.logs = []
+        if self._scenario is None or self._group is None:
+            raise RuntimeError("initialize_group must be called before register")
+        if self._group_base_state is None:
+            raise RuntimeError("The group base state has not been initialized")
+        if not self._free_idx:
+            raise RuntimeError(
+                "Trying to register an episode while no free env idx is left"
+            )
 
-    def _recursive_verif_log(self, log_ref : List, log_model : List[Log]) -> Tuple[bool,str]:
-        if len(log_ref) == 0 or isinstance(log_ref[0], Dict):
-            return self.task_ref.compare_log(log_ref, log_model)
-        elif isinstance(log_ref[0], List):
-            for possible_log_ref in log_ref:
-                out = self._recursive_verif_log(possible_log_ref, log_model)
-                if out[0] == True:
-                    return out
-            return False, "none of the proposition have completed" 
-        else:
-            raise RuntimeError(f"Unknow log ref structure. Need either a list of dict, with dict with 'action', 'content' or 'function' field. OR a list of list of dict (to show multiple valible possibility)")
+        env_idx = self._free_idx.pop(0)
+        try:
+            task_ref = build_episode_task(self._scenario, episode)
+            randomizer = deserialize_runtime_randomizer(episode.semantic)
+
+            # set the env state to the group default one
+            env_state = copy.deepcopy(self.env.get_state_dict())
+            base_slot_state = extract_env_state_val(
+                self._group_base_state,
+                env_idx,
+            )
+            batch_set_value(
+                env_state,
+                torch.tensor([env_idx]),
+                base_slot_state,
+            )
+
+            initialized_state = task_ref.initialize_task(
+                self.trajectory_converter.agents,
+                self.trajectory_converter.agents_name,
+                env_state=env_state,
+                nb_env=self.nb_env,
+                build_first_stage=True,
+                env_ids=[env_idx],
+            )
+            self.env.set_state_dict(initialized_state)
+
+            saved_data = SavedEnvData(
+                env_state=extract_env_state_val(initialized_state, env_idx),
+                logs=[],
+                stage_id=0,
+                stage_log_length=0,
+                attributes=copy.deepcopy(task_ref.get_init_attributes()),
+            )
+            context = EvalEpisodeContext(
+                episode=episode,
+                task_ref=task_ref,
+                randomizer=randomizer,
+                saved_data=saved_data,
+            )
+            self._envs[env_idx] = context
+
+            initial_situation = randomizer.get_randomized_situation(
+                task_ref.get_init_situation()
+            )
+            public_history = json.loads(
+                randomizer.traduce_attributes_to_llm(
+                    json.dumps(initial_situation.history)
+                )
+            )
+            public_attributes = decode_value(
+                copy.deepcopy(episode.semantic.visible_attributes)
+            )
+            if not isinstance(public_attributes, dict):
+                raise TypeError("Decoded semantic attributes must be a dictionary")
+            public_attributes["known_robots"] = list(task_ref.get_agent_names())
+            situation = EpisodeSituation(
+                tools=copy.deepcopy(randomizer.get_tools()),
+                attributes=public_attributes,
+                memory=initial_situation.memory,
+                current_instruction=task_ref.get_stage_input(0).instruction,
+                history=public_history,
+            )
+            return EpisodeData(
+                episode_id=episode.episode_id,
+                state=RunningState.WAITING_MODEL_ANSWER,
+                situation=situation,
+                env_idx=env_idx,
+            )
+        except Exception:
+            self._free_idx.append(env_idx)
+            self._free_idx.sort()
+            raise
+
+    def release_idx(self, env_idx: int) -> None:
+        """Release a slot only after all executor work has completed."""
+
+        context = self._envs.get(env_idx)
+        if context is None:
+            raise RuntimeError("Asking to release an env_idx that is not used")
+        
+        if context.tool_context is not None:
+            raise RuntimeError(
+                f"Cannot release environment {env_idx}: a tool is still active"
+            )
+        if context.judge_pending:
+            raise RuntimeError(
+                f"Cannot release environment {env_idx}: a judge is still active"
+            )
+
+        self._envs.pop(env_idx)
+        with self.lock:
+            self._judge_done.pop(env_idx, None)
+            self._immediate_done.pop(env_idx, None)
+        self._free_idx.append(env_idx)
+        self._free_idx.sort()
+
+    def compute_actions(
+            self,
+            tools_call: Dict[int, ValidExecutionReq],
+        ) -> None:
+        """Transform agent answers into actions for their assigned slots."""
+
+        obs = self.env.unwrapped.get_obs()
+        for env_idx, answer in tools_call.items():
+            context = self._envs.get(env_idx)
+            if context is None:
+                raise KeyError(f"No active episode in environment {env_idx}")
+            if context.tool_context is not None:
+                raise RuntimeError(
+                    f"Episode {context.episode.episode_id!r} already executes a tool"
+                )
+
+            context.last_agent_answer = answer
+            stage_id = context.saved_data.stage_id
+            is_text_only = context.task_ref.is_stage_text_only(stage_id)
+            if answer.get_say() != "":
+                if not is_text_only:
+                    self._store_local_failure(
+                        env_idx,
+                        "The agent returned a message while this stage requires an action.",
+                    )
+                    continue
+                self._submit_judge(env_idx)
+                continue
+
+            calls = answer.get_tool_calls()
+            if not calls:
+                self._store_local_failure(
+                    env_idx,
+                    "The agent returned neither a message nor a tool call.",
+                )
+                continue
+
+            stage = context.task_ref.stages[stage_id]
+            if is_text_only and not stage.allows_tools_before_answer():
+                canonical = build_text_only_action_failure_status(
+                    robot_names=[call.target_robot_name for call in calls],
+                    stage_id=stage_id,
+                    attributes=copy.deepcopy(context.saved_data.attributes),
+                    tool_calls=context.saved_data.tool_calls,
+                    forgiven_tool_calls=context.saved_data.forgiven_tool_calls,
+                )
+                with self.lock:
+                    self._immediate_done[env_idx] = context.randomizer.traduce_end(
+                        {env_idx: canonical}
+                    )[env_idx]
+                continue
+
+            saved_data = context.saved_data
+            tool_context = self._compute_tool(
+                task_ref=context.task_ref,
+                randomizer=context.randomizer,
+                calls=calls,
+                env_id=env_idx,
+                obs=obs,
+                error_state=saved_data.active_stage_error_state,
+                stage_id=saved_data.stage_id,
+                current_node_step=0,
+                original_log_length=saved_data.stage_log_length,
+                source_node_id=env_idx,
+                attributes=saved_data.attributes,
+                logs=saved_data.logs,
+                previous_tool_calls=saved_data.tool_calls,
+                previous_forgiven_tool_calls=saved_data.forgiven_tool_calls,
+                composite_progress=saved_data.composite_progress,
+                node_id=env_idx,
+            )
+            context.set_tool_context(tool_context)
+            if not tool_context.is_full_error():
+                self.trajectory_converter.transform_poses_in_actions(
+                    tool_context,
+                    env_idx,
+                )
+
+    def step(self) -> Union[torch.Tensor, OrderedDict]:
+        """Return the next batched low-level action."""
+
+        active_tools = {
+            env_idx: context.tool_context
+            for env_idx, context in self._envs.items()
+            if context.tool_context is not None
+        }
+        return self.trajectory_converter.step(active_tools)
+
+    def has_active_tools(self) -> bool:
+        """Return whether a physical simulator step is currently required."""
+
+        return any(
+            context.tool_context is not None
+            for context in self._envs.values()
+        )
+
+    def get_skill_api_provider(self, env_idx: int) -> SkillAPIProvider:
+        """Build the skill API provider for the episode occupying a slot."""
+
+        context = self._envs.get(env_idx)
+        if context is None:
+            raise KeyError(f"No active episode in environment {env_idx}")
+        tools = copy.deepcopy(context.randomizer.get_tools())
+        if not isinstance(tools, list):
+            raise TypeError("Decoded semantic tools must be a list")
+        pairs = []
+        for tool in tools:
+            public_name = tool.get("name")
+            mapping = context.randomizer.tools_equivalence.get(public_name)
+            if not isinstance(mapping, dict) or not isinstance(mapping.get("name"), str):
+                raise ValueError(
+                    f"Missing canonical mapping for public tool {public_name!r}"
+                )
+            pairs.append((tool, mapping["name"]))
+        return EvalSkillAPIProvider(tuple(pairs), context.randomizer)
+
+    def get_skill_execution_context(
+        self,
+        env_idx: int,
+        public_attributes: Dict,
+    ) -> SkillExecutionContext:
+        """Expose the current counters and public state to one skill manager."""
+
+        context = self._envs.get(env_idx)
+        if context is None:
+            raise KeyError(f"No active episode in environment {env_idx}")
+        return SkillExecutionContext(
+            stage_id=context.saved_data.stage_id,
+            attributes=copy.deepcopy(public_attributes),
+            tool_calls=context.saved_data.tool_calls,
+            forgiven_tool_calls=context.saved_data.forgiven_tool_calls,
+        )
     
-    def ask_for_retry(self, desired_env_ids: List[int], reset_joint_to_env_default : bool, error_state : ActiveStageErrorState, auto_compute : bool = True):
-        """
-        Ask the environment to re-try the last action for the desired_env_ids.
-        Allows to handle when there is a planning error.
 
-        It resets the env to the state before the last tool call, and retry it with a small randomization on the robot joints pose.
-        If reset_joint_to_env_default is True, it just reset the robot to its base pose.
-        If auto_compute is True, automatically re-compute the latent actions
-        """
-        full_state_dict = self.env.get_state_dict().copy()
-        calls = {}
-        robot_names = self.trajectory_converter.agents_name
-        for ids in desired_env_ids:
-            if ids >= self.nb_env:
-                raise RuntimeError(f"Asking reset for an unknow ids = {ids}. Max nb of env {self.nb_env}")
-            st = self._precedent_env_state[ids].env_state.copy()
-            source_state = extract_env_state_val(full_state_dict, ids)
-            if not reset_joint_to_env_default:
-                source_articulations = source_state.get('articulations', None)
+    def verif_ended_tool(self, obs: Dict) -> Dict[int, ToolStatus]:
+        """Verify completed tools and advance each episode independently."""
+
+        out = self._consume_judge_results()
+        with self.lock:
+            out.update(self._immediate_done)
+            self._immediate_done = {}
+        completed: List[
+            Tuple[int, EvalEpisodeContext, EnvToolContext, ToolStatus]
+        ] = []
+        retry_env_ids: List[int] = []
+
+        env_state = copy.deepcopy(self.env.get_state_dict())
+        state_changed = False
+
+        for env_idx, context in self._envs.items():
+            tool_context = context.tool_context
+            if tool_context is None:
+                continue
+            tool_context.compute_tool_results(obs)
+            if not tool_context.all_finished():
+                continue
+
+            tool_status = tool_context.build_tool_status()
+            if tool_status.should_restore_source_env_state():
+                context.tool_context = None
+                retry_env_ids.append(env_idx)
+                continue
+            
+            # Apply possible state changement (move_to, object state changement)
+            state_changed |= apply_env_state_updates(
+                env_state,
+                env_idx,
+                tool_context.get_state_updates(),
+            )
+            completed.append((env_idx, context, tool_context, tool_status))
+
+        if state_changed:
+            self.env.set_state_dict(env_state)
+            obs = self.env.unwrapped.get_obs()
+
+        # MAIN VERIFICATION LOOP
+        # Verify Goals and Logs on completed env (tool finished)
+        for env_idx, context, tool_context, tool_status in completed:
+            task_ref = context.task_ref
+            saved_data = context.saved_data
+            stage_id = saved_data.stage_id
+            advanced_stage = False
+            is_last_stage = stage_id == task_ref.get_nb_total_stage() - 1
+            next_input = (
+                None
+                if is_last_stage
+                else task_ref.get_stage_input(stage_id + 1)
+            )
+
+            if task_ref.is_stage_text_only(stage_id):
+                tool_status.stage_state = task_ref.get_stage_state(
+                    stage_id,
+                    tool_status.tool_calls,
+                    tool_status.forgiven_tool_calls,
+                    tool_status.stage_success,
+                    tool_context.logs,
+                )
+            elif tool_context.is_full_error():
+                #All tools have fail (error in processing, bad robot name, full syntax errors)
+                if tool_context.has_terminal_tool_failure():
+                    tool_status.stage_success = StageSuccess.FAILED
+                tool_status.stage_state = task_ref.get_stage_state(
+                    stage_id,
+                    tool_status.tool_calls,
+                    tool_status.forgiven_tool_calls,
+                    tool_status.stage_success,
+                    tool_context.logs,
+                )
             else:
-                source_articulations = self.task_ref._default_env_state.get('articulations', None)
+                #valid execution
+                env_score = task_ref.verif_stage_env_completion(
+                    stage_id,
+                    obs,
+                    [env_idx],
+                )[0].item()
+                full_logs, stage_logs = tool_context._get_logs()
+                log_score = task_ref.verif_stage_log_completion(
+                    stage_id,
+                    full_log=full_logs,
+                    stage_log=stage_logs,
+                    composite_progress=tool_context.composite_progress,
+                )
+                stage_score = task_ref.combine_stage_verif_scores(
+                    stage_id,
+                    env_score,
+                    log_score,
+                )
+                tool_status.reward = stage_score
+                if stage_score < 0:
+                    tool_status.stage_success = StageSuccess.FAILED
+                elif stage_score > 0:
+                    tool_status.stage_success = StageSuccess.FINISH
+                    tool_status.next_input = next_input
+                    if next_input is not None:
+                        env_state = self._pass_to_the_next_stage(
+                            task_ref,
+                            stage_id,
+                            [env_idx],
+                            env_state,
+                        )
+                        state_changed = True
+                        saved_data.stage_id += 1
+                        saved_data.stage_log_length = len(tool_context.logs)
+                        saved_data.active_stage_error_state = {}
+                        saved_data.composite_progress = {}
+                        advanced_stage = True
+                elif task_ref.should_reset_same_stage(stage_id):
+                    batch_set_value(
+                        env_state,
+                        torch.tensor([env_idx]),
+                        task_ref._default_env_state,
+                    )
+                    state_changed = True
+                    saved_data.stage_log_length = len(tool_context.logs)
 
+                tool_status.stage_state = task_ref.get_stage_state(
+                    stage_id,
+                    tool_status.tool_calls,
+                    tool_status.forgiven_tool_calls,
+                    tool_status.stage_success,
+                    full_logs,
+                )
+
+            saved_data.logs = tool_context.logs
+            saved_data.attributes = copy.deepcopy(tool_context.attributes)
+            if advanced_stage:
+                saved_data.tool_calls = 0
+                saved_data.forgiven_tool_calls = 0
+                saved_data.active_stage_error_state = {}
+                saved_data.composite_progress = {}
+            else:
+                saved_data.tool_calls = tool_context.tool_calls
+                saved_data.forgiven_tool_calls = tool_context.forgiven_tool_calls
+                saved_data.active_stage_error_state = tool_context.error_state
+                saved_data.composite_progress = tool_context.composite_progress
+            context.retry_count = 0
+            context.tool_context = None
+
+            translated = context.randomizer.traduce_end(
+                {env_idx: tool_status}
+            )[env_idx]
+            out[env_idx] = translated
+
+        if state_changed:
+            self.env.set_state_dict(env_state)
+        for env_idx, context, _, _ in completed:
+            context.saved_data.env_state = extract_env_state_val(
+                env_state,
+                env_idx,
+            )
+
+        if retry_env_ids:
+            out.update(self._handle_tool_retry(retry_env_ids))
+
+        return out
+
+    def _handle_tool_retry(self, env_ids: List[int]) -> Dict[int, ToolStatus]:
+        """Restore committed states and replay answers after planner failures."""
+
+        env_state = copy.deepcopy(self.env.get_state_dict())
+        answers: Dict[int, ValidExecutionReq] = {}
+        failed: Dict[int, ToolStatus] = {}
+        robot_names = self.trajectory_converter.agents_name
+
+        for env_idx in env_ids:
+            context = self._envs[env_idx]
+            if context.retry_count >= 10:
+                canonical = ToolStatus(
+                    robots_status=[
+                        RobotToolStatus(
+                            "",
+                            "Planner failed after 10 retries.",
+                            False,
+                            ToolErrorFlag.PLANNER_ERROR,
+                        )
+                    ],
+                    stage_id=context.saved_data.stage_id,
+                    attributes=copy.deepcopy(context.saved_data.attributes),
+                    error_descriptions=[""],
+                    failure_reason="Planner error exceeded 10 retries.",
+                    stage_success=StageSuccess.FAILED,
+                    tool_calls=context.saved_data.tool_calls,
+                    forgiven_tool_calls=context.saved_data.forgiven_tool_calls,
+                )
+                failed[env_idx] = context.randomizer.traduce_end(
+                    {env_idx: canonical}
+                )[env_idx]
+                continue
+            context.retry_count += 1
+            restored_state = copy.deepcopy(context.saved_data.env_state)
+            current_state = extract_env_state_val(env_state, env_idx)
+
+            if context.retry_count % 2:
+                source_articulations = current_state.get("articulations")
+            else:
+                source_articulations = context.task_ref._default_env_state.get(
+                    "articulations"
+                )
             if source_articulations is not None:
-                st['articulations'], _ = merge_robot_articulations(
-                    st.get('articulations', {}),
+                restored_state["articulations"], _ = merge_robot_articulations(
+                    restored_state.get("articulations", {}),
                     source_articulations,
                     robot_names,
                 )
 
-            batch_set_value(full_state_dict, torch.tensor([ids]), st, strict=False)
-            calls[ids] = self._precedent_env_state[ids].tool_call.copy()
-        self.env.set_state_dict(full_state_dict)
-        action = self.step()
-        _ , _, _, _,_ = self.env.step(action)
-        if auto_compute:
-            self.compute_actions(calls, error_state=error_state)
+            batch_set_value(
+                env_state,
+                torch.tensor([env_idx]),
+                restored_state,
+                strict=False,
+            )
+            answers[env_idx] = context.get_answer()
 
+        self.env.set_state_dict(env_state)
+        if answers:
+            self.compute_actions(answers)
+        return failed
 
-    def _verif_log_rules(self, log_rules: List[Any], logs: List[Log]) -> Tuple[bool, str]:
-        verdict = True
-        reasons = []
+    def _store_local_failure(self, env_idx: int, reason: str) -> None:
+        """Queue an episode-local protocol failure for the main runner."""
 
-        for rule in log_rules:
-            rule_verdict, reason = rule.verify(logs)
-            if not rule_verdict:
+        context = self._envs[env_idx]
+        status = ToolStatus(
+            robots_status=[],
+            stage_id=context.saved_data.stage_id,
+            attributes=copy.deepcopy(context.saved_data.attributes),
+            error_descriptions=[],
+            failure_reason=reason,
+            stage_success=StageSuccess.FAILED,
+            tool_calls=context.saved_data.tool_calls,
+            forgiven_tool_calls=context.saved_data.forgiven_tool_calls,
+        )
+        with self.lock:
+            self._immediate_done[env_idx] = context.randomizer.traduce_end(
+                {env_idx: status}
+            )[env_idx]
+
+    def _submit_judge(self, env_idx: int, retry: bool = False) -> None:
+        """Submit one text-only answer using its environment as identifier."""
+
+        if self.worker is None:
+            raise RuntimeError("Text-only verification requires a judge worker")
+        context = self._envs[env_idx]
+        if context.judge_pending and not retry:
+            raise RuntimeError(
+                f"Episode {context.episode.episode_id!r} already waits for a judge"
+            )
+        stage_id = context.saved_data.stage_id
+        rule = context.task_ref.get_stage_rule(stage_id)
+        if not rule:
+            raise RuntimeError(
+                f"Stage {stage_id} of {context.episode.episode_id!r} "
+                "has no verification prompt"
+            )
+
+        context.judge_pending = True
+        payload = JudgePayload(
+            rule=rule,
+            model_answer=context.get_answer().get_say(),
+            id=env_idx,
+            question=context.task_ref.get_stage_input(
+                stage_id
+            ).instruction.get_content(),
+        )
+        try:
+            self.worker.submit(payload, callback=self._on_judge_correction)
+        except Exception:
+            context.judge_pending = False
+            raise
+
+    def _on_judge_correction(self, future: Future) -> None:
+        """Store a judge result for the episode occupying its environment."""
+
+        env_idx, judge_response = future.result()
+        context = self._envs.get(env_idx)
+        if context is None:
+            return
+
+        try:
+            judge_dict = json.loads(judge_response)
+            verdict = judge_dict["verdict"]
+            if not isinstance(verdict, bool):
+                raise TypeError("Judge verdict must be a boolean")
+        except (json.JSONDecodeError, KeyError, TypeError):
+            if context.retry_count >= 5:
                 verdict = False
-            reason = reason.strip()
-            if reason:
-                reasons.append(reason)
-
-        return verdict, " - ".join(reasons)
-
-    def verif_complementary_bench(
-            self,
-            model_say : str,
-            complementary_verif : Optional[Dict[str, Any]]
-        ) -> Dict:
-        """
-        Benchmark only.
-
-        Verify some complementary elements such as logs, model answer...
-
-        Return a dict with a bool 'verdict' and a string 'explanation'.
-        """
-        complementary_verif = {} if complementary_verif is None else complementary_verif
-        if not isinstance(complementary_verif, dict):
-            raise TypeError(
-                f"complementary_verif must be a dict or None. Got {type(complementary_verif)}."
-            )
-        
-        log_ref = complementary_verif.get("logs", None)
-        log_rules = complementary_verif.get("log_rules", [])
-        judge_verif = complementary_verif.get("judge", None)
-
-        log_verdict, log_reason = True, ""
-        log_rules_verdict, log_rules_reason = True, ""
-        if log_ref or log_rules:
-            full_log, stage_log = self._get_logs(0)
-            if log_ref == ['empty']:
-                if len(full_log) != 0:
-                    log_verdict, log_reason = False, f"Log should be empty but got {len(full_log)} element"
-            elif log_ref:
-                # print(log_ref)
-                # print("VS")
-                # print("FULL : ", [l.to_string() for l in full_log])
-                exact_stage_log = full_log[-len(log_ref):]
-                # print("STAGE : ", [l.to_string() for l in exact_stage_log])
-                log_verdict, log_reason = self._recursive_verif_log(log_ref, exact_stage_log)
-                # print(log_verdict)
-                # print(log_reason)
-                # print("=========")
-
-            if log_rules:
-                # Benchmark log rules intentionally run on the full log so one
-                # rule can span multiple benchmark stages when needed.
-                log_rules_verdict, log_rules_reason = self._verif_log_rules(log_rules, full_log)
-
-        if judge_verif:
-            if self.randomized:
-                judge_verif = self.randomizer.traduce_attributes_to_llm(judge_verif)
-            payload = JudgePayload(rule=judge_verif, model_answer=model_say, id=0)
-            future = self.worker.submit(payload, callback=None)
-            i, judge_str = future.result()
-            try:
-                judge_dict = json.loads(judge_str)
-            except:
-                judge_dict = {}
-            if not "verdict" in judge_dict:
-                payload = JudgePayload(rule=judge_verif, model_answer=model_say, id=0)
-                future = self.worker.submit(payload, callback=None)
-                i, judge_str = future.result()
-                judge_dict = json.loads(judge_str)
+                failure_reason = "Judge failed to return a valid verdict after 6 attempts"
+            else:
+                context.retry_count += 1
+                self._submit_judge(env_idx, retry=True)
+                return
         else:
-            judge_dict = {"verdict": True, "explanation":""}
+            failure_reason = str(
+                judge_dict.get("reason", judge_dict.get("explanation", ""))
+            ).strip()
 
-        explanation_parts = []
+        stage_id = context.saved_data.stage_id
+        status = ToolStatus(
+            robots_status=[
+                RobotToolStatus("", "", verdict, ToolErrorFlag.NONE)
+            ],
+            error_descriptions=[""],
+            failure_reason=failure_reason,
+            stage_id=stage_id,
+            stage_success=(
+                StageSuccess.FINISH if verdict else StageSuccess.FAILED
+            ),
+            attributes=copy.deepcopy(context.saved_data.attributes),
+            tool_calls=context.saved_data.tool_calls,
+            forgiven_tool_calls=context.saved_data.forgiven_tool_calls,
+        )
+        with self.lock:
+            self._judge_done[env_idx] = status
 
-        log_reason = log_reason.strip()
-        if log_reason:
-            explanation_parts.append(log_reason)
+    def _consume_judge_results(self) -> Dict[int, ToolStatus]:
+        """Apply main-thread stage transitions for completed judge requests."""
 
-        log_rules_reason = log_rules_reason.strip()
-        if log_rules_reason:
-            explanation_parts.append(log_rules_reason)
+        with self.lock:
+            completed = self._judge_done
+            self._judge_done = {}
 
-        judge_explanation = judge_dict.get("explanation", "").strip()
-        if judge_explanation:
-            explanation_parts.append(judge_explanation)
-
-        return {
-            "verdict" : judge_dict.get("verdict",True) and log_verdict and log_rules_verdict,
-            "explanation" : " - ".join(explanation_parts)
-        }
-
-    def check_env_state(self, obs : Dict):
-        """
-        Used for Checking if env has passed the stage in eval mode.
-
-        Return a list of 0 (running), 1 (finish), -1 (error) representing the status of all envs.
-        """
-        out = []
-        stage_id = self._eval_envs[0].current_task_stage
-        env_ids = list(range(self.nb_env))
-        env_verif = self.task_ref.verif_stage_env_completion(stage_id, obs, env_ids=env_ids).cpu().tolist()
-        for i in range(self.nb_env):
-            full_log, stage_log = self._get_logs(i)
-            log_verif = self.task_ref.verif_stage_log_completion(stage_id=stage_id ,full_log=full_log, stage_log=stage_log)
-            out.append(self.task_ref.combine_stage_verif_scores(stage_id, env_verif[i], log_verif))
-
-        if all([score == 1 for score in out]):
-            if stage_id != self.task_ref.get_nb_total_stage()-1:
-                new_id = stage_id+1
-                st = self.env.get_state_dict().copy()
-                self._pass_to_the_next_stage(stage_id, env_ids, st)
-
-                situation = self.get_init_situation(new_id)
-                print(f"NEXT STAGE : {new_id} with instruction {situation.instruction.get_content()}")
-
-                for i in range(self.nb_env):
-                    # Specific modifications
-                    self._eval_envs[i].current_task_stage = new_id
-                    self._eval_envs[i].stage_log_start_idx = len(self._eval_envs[i].logs)
-                    # A new stage must resample its own active error profile.
-                    self._eval_envs[i].error_state = {}
-
-                self.env.set_state_dict(st)
-            else:
-                print("FINISHED TASK")
-
-        return out
-    
-    def get_current_task_attributes(self):
-        """
-        Specific function to get the task attributes of all env (the latest in case of multiple stage between envs)
-        """
-        stage = 0
-        for tool_infos in self._eval_envs.values():
-            if tool_infos.current_task_stage > stage: stage = tool_infos.current_task_stage
-        
-        return self.get_task_attributes(stage)
-
-    def _initialize_stage_error_state(
-            self,
-            stage_id: int,
-            error_state: ActiveStageErrorState,
-            obs: Dict,
-            env_id: int,
-            agent_id: int = 0,
-        ) -> ActiveStageErrorState:
-        return error_state
-    
-    def compute_actions(self, tools_call : Dict, error_state : Optional[ActiveStageErrorState] = None):
-        """
-        Take a batch of tools_calls. It's a dict where each key is a node_id associate with a dict.
-        In case of GENERATION mode, the value dict contains 'tool' (the action dict) and 'src_id' (the parent node_id).
-        In case of EVALUATION mode, the value dict contains directly the action dict.
-        Transforms this into a batched sequence of steps per environment.
-        """
-
-        # print("------- ACTION COMPUTE -------")
- 
-        # step to have obs
-        action = self.step()
-        obs , _, _, _,_ = self.env.step(action)
-        state_dict = self.env.get_state_dict().copy()
-
-        for env_id, func in tools_call.items():
-            func_name = func.get("name", None)
-            params = func.get("arguments", {})
-
-            self._precedent_env_state[env_id] = SavedEnvState(
-                env_state=extract_env_state_val(state_dict,env_id),
-                tool_call=func
-            )
-
-            if env_id in self._eval_envs:
-                stage_id = self._eval_envs[env_id].current_task_stage
-                logs = self._eval_envs[env_id].logs
-                stage_log_length = self._eval_envs[env_id].stage_log_start_idx
-            else:
-                stage_id = 0
-                stage_log_length = 0
-                logs = []
-            active_stage_error_state = {} if error_state is None else error_state
-            
-            if func_name:
-                tool_infos = self._compute_single_tool(
-                    func_name,
-                    params,
-                    env_id,
-                    obs,
-                    active_stage_error_state,
-                    current_node_step=0,
-                    stage_id=stage_id,
-                    node_id=env_id,
-                    logs=logs,
-                    source_node_id=0,
-                    original_log_length=stage_log_length
-                )
-            else:
-                tool_infos = self._compute_multiple_tool(
-                    actions = func,
-                    env_id=env_id,
-                    obs=obs,
-                    error_state=active_stage_error_state,
-                    stage_id=stage_id,
-                    current_node_step=0,
-                    node_id=env_id,
-                    logs=logs,
-                    source_node_id=0,
-                    original_log_length=stage_log_length
-                )
-            self._eval_envs[env_id] = tool_infos
-            if tool_infos.is_full_error():
-                # print(f"[FunctionExecutor] No poses returned for {func_name} : {tool_execution.reason}")
-                continue
-
-            _ = self.trajectory_converter.transform_poses_in_actions(
-                    tool_infos,
-                    env_id
-                )
-
-    def step(self) -> Union[torch.Tensor, OrderedDict]:
-        """
-        Execute the actions in the environment.
-
-        Returns:
-            Dict: If SingleAGent env, return a batched tensor of action. For MultiAGent, return an OrderedDict
-        """
-        return self.trajectory_converter.step(self._eval_envs)
-
-    def verif_ended_tool(self, obs : Dict) -> Dict:
-        out = {}
-        for env_id, env_infos in self._eval_envs.items():
-            traj_to_compute = env_infos.compute_tool_results(obs)
-
-            if traj_to_compute:
-                res = self.trajectory_converter.transform_poses_in_actions(
-                    env_infos,
-                    env_id
-                )
-
-            if env_infos.all_finished():
-
-                results, mess, att_modif = env_infos.build_return()
-                error_flags = env_infos.get_error_flags()
-        
-
-                out[env_infos.node_id] = {
-                    'success':results,
-                    "reason":mess,
-                    "att_modif" : att_modif,
-                    "planning_error": [e == ToolErrorFlag.PLANNER_ERROR for e in error_flags],
-                    "runtime_error_triggered": any(flag == "injection_error" for flag in error_flags),
-                    "error_description": env_infos.get_error_descriptions(),
-                }
-                env_infos.tool_robots = []
-
-        return self.randomizer.traduce_end_eval(out) if self.randomized else out
-
-    ################ private function
-
-    def _get_logs(self, env_id: int) -> Tuple[List[Log], List[Log]]:
-        """
-        Return the log corresponding to the given env_id
-        """
-        return self._eval_envs[env_id]._get_logs()
-
-    def _get_node_infos(self, node_id):
-        """Allows to retrieve the env information (env_state and logs) from a specific nodes"""
-
-        def _extract_env_state_val(st, env_id) -> Dict:
-            out = {}
-            for key, value in st.items():
-                if isinstance(value, Dict):
-                    out[key] = _extract_env_state_val(value, env_id)
-                else:
-                    out[key] = value[env_id].clone()
+        out: Dict[int, ToolStatus] = {}
+        if not completed:
             return out
 
-        return {
-            "logs" : self._eval_envs[node_id].logs,
-            "env_state" : _extract_env_state_val(self.env.get_state_dict().copy(),node_id)
-        }
-   
+        env_state = copy.deepcopy(self.env.get_state_dict())
+        state_changed = False
+        for env_idx, status in completed.items():
+            context = self._envs.get(env_idx)
+            if context is None:
+                continue
+
+            stage_id = context.saved_data.stage_id
+            task_ref = context.task_ref
+            has_next_stage = stage_id < task_ref.get_nb_total_stage() - 1
+            if status.stage_success == StageSuccess.FINISH and has_next_stage:
+                status.next_input = task_ref.get_stage_input(stage_id + 1)
+                env_state = self._pass_to_the_next_stage(
+                    task_ref,
+                    stage_id,
+                    [env_idx],
+                    env_state,
+                )
+                state_changed = True
+                context.saved_data.stage_id += 1
+                context.saved_data.stage_log_length = len(
+                    context.saved_data.logs
+                )
+                context.saved_data.active_stage_error_state = {}
+                context.saved_data.composite_progress = {}
+                context.saved_data.tool_calls = 0
+                context.saved_data.forgiven_tool_calls = 0
+
+            status.stage_state = task_ref.get_stage_state(
+                stage_id,
+                status.tool_calls,
+                status.forgiven_tool_calls,
+                status.stage_success,
+                context.saved_data.logs,
+            )
+            context.retry_count = 0
+            context.judge_pending = False
+            out[env_idx] = context.randomizer.traduce_end(
+                {env_idx: status}
+            )[env_idx]
+
+        if state_changed:
+            self.env.set_state_dict(env_state)
+            for env_idx in completed:
+                context = self._envs.get(env_idx)
+                if context is not None:
+                    context.saved_data.env_state = extract_env_state_val(
+                        env_state,
+                        env_idx,
+                    )
+        return out

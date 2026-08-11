@@ -1,76 +1,327 @@
-from .metrics_scenario import ScenarioResult
-from .metrics import compute_benchmark_metrics
-from .export import build_benchmark_payload, export_scenario_summary
+from __future__ import annotations
 
-from typing import List, Dict
+from datetime import datetime, timezone
+import hashlib
 import os
-import threading, queue
+from pathlib import Path
+import shutil
+import tempfile
+from typing import Dict, List, Optional, Sequence
 
-class ResultManager():
-    """This class handle the export and save of the multiple log, result for the benchmark"""
+from magma_bench.artifacts import BenchmarkManifest, load_json_model
+from magma_bench.data_structures import Episode, Scenario
 
-    _output_path : str
+from .metrics import EpisodeBinding, compute_metrics
+from .models import (
+    AgentIdentity,
+    BenchmarkResult,
+    EpisodeOutcome,
+    EpisodeResult,
+    RunManifest,
+    ScenarioResult,
+)
 
-    _computed_bench_results : Dict[str, List[ScenarioResult]]
-    _waiting_bench_results : queue.Queue
+
+def benchmark_fingerprint(root: Path, manifest: BenchmarkManifest) -> str:
+    """Hash the manifest and every artifact it transitively indexes."""
+
+    digest = hashlib.sha256()
+    relative_paths = {Path("benchmark.json")}
+    relative_paths.update(
+        Path(scenario_id) / "scenario.json"
+        for scenario_id in manifest.scenarios
+    )
+    for entry in manifest.episodes:
+        episode_path = Path(entry.path)
+        relative_paths.add(episode_path)
+        relative_paths.add(episode_path.parents[1] / "semantic.json")
+        relative_paths.add(episode_path.parents[2] / "skeleton.json")
+
+    for relative_path in sorted(relative_paths, key=str):
+        path = root / relative_path
+        if not path.is_file():
+            raise ValueError(f"Missing indexed benchmark artifact: {path}")
+        relative = str(path.relative_to(root)).replace(os.sep, "/")
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _write_model_atomic(path: Path, model) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = model.model_dump_json(indent=2)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as temporary:
+        temporary.write(payload)
+        temporary.write("\n")
+        temporary_path = Path(temporary.name)
+    try:
+        os.replace(temporary_path, path)
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
+class ResultManager:
+    """Persist episode traces and derive resumable scenario/global metrics."""
 
     def __init__(
-            self,
-            output_path : str,
-            per_task_log : bool = True,
-            unique_try : bool = False,
+        self,
+        results_path: Path,
+        benchmark_root: Path,
+        agent_card: Dict,
+        scenarios: Sequence[Scenario],
     ) -> None:
-        self._output_path = output_path
-        self._computed_bench_results = {}
-        self._waiting_bench_results = queue.Queue()
-        self._unique_try = unique_try
+        self.results_path = results_path.resolve()
+        self.benchmark_root = benchmark_root.resolve()
+        self.scenarios = tuple(scenarios)
+        self.scenario_by_id = {
+            scenario.scenario_id: scenario for scenario in self.scenarios
+        }
+        if len(self.scenario_by_id) != len(self.scenarios):
+            raise ValueError("Scenario IDs must be unique")
 
-        self.thread = threading.Thread(target=self._compute_result, daemon=True)
-        self.thread.start()
-    
-    def _compute_result(self):
-        while True:
-            scenario_result : ScenarioResult = self._waiting_bench_results.get()
-            if scenario_result == None:
-                break
+        self.episode_bindings: Dict[str, EpisodeBinding] = {}
+        for scenario in self.scenarios:
+            for episode in scenario.episodes:
+                if episode.episode_id in self.episode_bindings:
+                    raise ValueError(
+                        f"Duplicated episode ID {episode.episode_id!r}"
+                    )
+                if Path(episode.episode_id).name != episode.episode_id:
+                    raise ValueError(
+                        f"Episode ID cannot be used as a filename: {episode.episode_id!r}"
+                    )
+                self.episode_bindings[episode.episode_id] = (
+                    scenario.scenario_id,
+                    episode,
+                )
 
-            scenario_result.compute_result()
+        manifest_model = load_json_model(
+            self.benchmark_root / "benchmark.json",
+            BenchmarkManifest,
+        )
+        if not isinstance(manifest_model, BenchmarkManifest):
+            raise TypeError("Unexpected benchmark manifest model")
+        identity = AgentIdentity.model_validate({
+            "agent": agent_card.get("agent"),
+            "remote_agent": agent_card.get("remote_agent"),
+            "prediction_mode": agent_card.get("prediction_mode"),
+        })
+        self.run_manifest = RunManifest(
+            benchmark_version=manifest_model.benchmark_version,
+            benchmark_fingerprint=benchmark_fingerprint(
+                self.benchmark_root,
+                manifest_model,
+            ),
+            agent=identity,
+            created_at=datetime.now(timezone.utc).isoformat(),
+            scenario_ids=[scenario.scenario_id for scenario in self.scenarios],
+        )
+        self.active_scenario_id: Optional[str] = None
+        self._initialize_run()
 
-            if not scenario_result.scenario_id in self._computed_bench_results:
-                self._computed_bench_results[scenario_result.scenario_id] = []
-            self._computed_bench_results[scenario_result.scenario_id].append(scenario_result)
+    @property
+    def scenarios_path(self) -> Path:
+        return self.results_path / "scenarios"
 
-            self._export(scenario_result)
+    def _initialize_run(self) -> None:
+        run_path = self.results_path / "run.json"
+        if run_path.exists():
+            existing = RunManifest.model_validate_json(
+                run_path.read_text(encoding="utf-8")
+            )
+            expected = self.run_manifest.model_copy(
+                update={"created_at": existing.created_at}
+            )
+            if existing != expected:
+                raise ValueError(
+                    "Existing results are incompatible with the selected "
+                    "benchmark or agent"
+                )
+        else:
+            if self.results_path.exists() and any(self.results_path.iterdir()):
+                raise ValueError(
+                    f"Results directory {self.results_path} is non-empty but has no run.json"
+                )
+            self.results_path.mkdir(parents=True, exist_ok=True)
+            _write_model_atomic(run_path, self.run_manifest)
+        self.scenarios_path.mkdir(parents=True, exist_ok=True)
+        (self.scenarios_path / ".partial").mkdir(parents=True, exist_ok=True)
 
+    def _completed_scenario_path(self, scenario_id: str) -> Path:
+        return self.scenarios_path / scenario_id
 
-    def stop(self):
-        self._waiting_bench_results.put(None)   # unblocks the queue
-        self.thread.join()
-            
-    def get_try_output_path(self, scenario_id: str, try_number: int) -> str:
-        base_path = os.path.join(self._output_path, scenario_id)
-        os.makedirs(base_path, exist_ok=True)
-        out_path = os.path.join(base_path, f"try-{try_number}")
-        os.makedirs(out_path, exist_ok=True)
-        return out_path
+    def _partial_scenario_path(self, scenario_id: str) -> Path:
+        return self.scenarios_path / ".partial" / scenario_id
 
-    def _export(self, scenario_result : ScenarioResult):
-        """Start the export process"""
-        out_path = self.get_try_output_path(scenario_result.scenario_id, scenario_result.try_number)
-        scenario_result.export(out_path)
-
-    def push_scenario_result(self, scenario_result : ScenarioResult):            
-        self._waiting_bench_results.put(scenario_result)
-
-    def compute_global_metrics(self) -> Dict:
-        benchmark_metrics = compute_benchmark_metrics(self._computed_bench_results)
-
-        for scenario_id, scenario_metrics in benchmark_metrics.per_scenario.items():
-            output_path = os.path.join(self._output_path, scenario_id, "result.json")
-            export_scenario_summary(
-                scenario_metrics,
-                output_path,
-                len(self._computed_bench_results[scenario_id]),
+    def start_scenario(self, scenario: Scenario) -> bool:
+        if self.active_scenario_id is not None:
+            raise RuntimeError(
+                f"Scenario {self.active_scenario_id!r} is already active"
+            )
+        if scenario.scenario_id not in self.scenario_by_id:
+            raise ValueError(
+                f"Scenario {scenario.scenario_id!r} is not registered in this run"
             )
 
-        return build_benchmark_payload(benchmark_metrics)
+        completed_path = self._completed_scenario_path(scenario.scenario_id)
+        if completed_path.exists():
+            self._load_completed_scenario(scenario)
+            return False
+
+        partial_path = self._partial_scenario_path(scenario.scenario_id)
+        if partial_path.exists():
+            shutil.rmtree(partial_path)
+        (partial_path / "episodes").mkdir(parents=True)
+        self.active_scenario_id = scenario.scenario_id
+        return True
+
+    def record_episode(self, outcome: EpisodeOutcome) -> None:
+        if self.active_scenario_id is None:
+            raise RuntimeError("No scenario is active")
+        binding = self.episode_bindings.get(outcome.episode_id)
+        if binding is None:
+            raise KeyError(f"Unknown episode {outcome.episode_id!r}")
+        scenario_id, _ = binding
+        if scenario_id != self.active_scenario_id:
+            raise ValueError(
+                f"Episode {outcome.episode_id!r} belongs to {scenario_id!r}, "
+                f"not active scenario {self.active_scenario_id!r}"
+            )
+
+        result = EpisodeResult.model_validate(outcome.model_dump(mode="python"))
+        path = (
+            self._partial_scenario_path(scenario_id)
+            / "episodes"
+            / f"{outcome.episode_id}.json"
+        )
+        if path.exists():
+            raise ValueError(
+                f"Episode {outcome.episode_id!r} was completed more than once"
+            )
+        _write_model_atomic(path, result)
+
+    def finish_scenario(self, scenario: Scenario) -> ScenarioResult:
+        if self.active_scenario_id != scenario.scenario_id:
+            raise RuntimeError(
+                f"Scenario {scenario.scenario_id!r} is not the active scenario"
+            )
+        partial_path = self._partial_scenario_path(scenario.scenario_id)
+        results = self._load_episode_results(partial_path, scenario)
+        infrastructure_failures = [
+            result.episode_id
+            for result in results.values()
+            if result.terminal.status == "infrastructure_failure"
+        ]
+        if infrastructure_failures:
+            raise RuntimeError(
+                "Scenario contains infrastructure failures and remains partial: "
+                f"{sorted(infrastructure_failures)}"
+            )
+
+        bindings = [
+            (scenario.scenario_id, episode) for episode in scenario.episodes
+        ]
+        scenario_result = ScenarioResult(
+            scenario_id=scenario.scenario_id,
+            track=scenario.track,
+            metrics=compute_metrics(bindings, results),
+        )
+        _write_model_atomic(partial_path / "result.json", scenario_result)
+        completed_path = self._completed_scenario_path(scenario.scenario_id)
+        if completed_path.exists():
+            raise FileExistsError(
+                f"Completed scenario path already exists: {completed_path}"
+            )
+        os.replace(partial_path, completed_path)
+        self.active_scenario_id = None
+        return scenario_result
+
+    def finish_benchmark(self) -> BenchmarkResult:
+        if self.active_scenario_id is not None:
+            raise RuntimeError(
+                f"Scenario {self.active_scenario_id!r} is still active"
+            )
+        all_bindings: List[EpisodeBinding] = []
+        all_results: Dict[str, EpisodeResult] = {}
+        for scenario in self.scenarios:
+            results = self._load_completed_scenario(scenario)
+            all_bindings.extend(
+                (scenario.scenario_id, episode) for episode in scenario.episodes
+            )
+            all_results.update(results)
+
+        benchmark_result = BenchmarkResult(
+            metrics=compute_metrics(all_bindings, all_results)
+        )
+        _write_model_atomic(self.results_path / "result.json", benchmark_result)
+        return benchmark_result
+
+    def _load_completed_scenario(
+        self,
+        scenario: Scenario,
+    ) -> Dict[str, EpisodeResult]:
+        completed_path = self._completed_scenario_path(scenario.scenario_id)
+        result_path = completed_path / "result.json"
+        if not result_path.is_file():
+            raise ValueError(
+                f"Completed scenario {scenario.scenario_id!r} has no valid result.json"
+            )
+        stored = ScenarioResult.model_validate_json(
+            result_path.read_text(encoding="utf-8")
+        )
+        if stored.scenario_id != scenario.scenario_id or stored.track != scenario.track:
+            raise ValueError(
+                f"Stored scenario result does not match {scenario.scenario_id!r}"
+            )
+        results = self._load_episode_results(completed_path, scenario)
+        expected_metrics = compute_metrics(
+            [(scenario.scenario_id, episode) for episode in scenario.episodes],
+            results,
+        )
+        if stored.metrics != expected_metrics:
+            raise ValueError(
+                f"Stored metrics are stale or corrupted for {scenario.scenario_id!r}"
+            )
+        return results
+
+    def _load_episode_results(
+        self,
+        scenario_path: Path,
+        scenario: Scenario,
+    ) -> Dict[str, EpisodeResult]:
+        episodes_path = scenario_path / "episodes"
+        actual_files = set(episodes_path.glob("*.json")) if episodes_path.is_dir() else set()
+        expected_files = {
+            episodes_path / f"{episode.episode_id}.json"
+            for episode in scenario.episodes
+        }
+        if actual_files != expected_files:
+            raise ValueError(
+                f"Episode results mismatch for {scenario.scenario_id!r}: "
+                f"missing={sorted(path.name for path in expected_files - actual_files)}, "
+                f"unexpected={sorted(path.name for path in actual_files - expected_files)}"
+            )
+        results = {
+            episode.episode_id: EpisodeResult.model_validate_json(
+                (episodes_path / f"{episode.episode_id}.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            for episode in scenario.episodes
+        }
+        for episode_id, result in results.items():
+            if result.episode_id != episode_id:
+                raise ValueError(
+                    f"Episode result identity mismatch in {episode_id!r}"
+                )
+        return results

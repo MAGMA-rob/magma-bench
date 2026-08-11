@@ -63,7 +63,7 @@ def test_launch_subset_enables_backendless_test_mode_when_skip_judge_is_set():
     runner_state = {}
 
     launch_module = types.ModuleType("magma_bench.launch")
-    launch_module.build_override_dict = lambda _args: {"benchmark": {"logs": False}}
+    launch_module.build_override_dict = lambda _args: {"benchmark": {}}
     launch_module.resolve_config_path = lambda path: path
     sys.modules["magma_bench.launch"] = launch_module
 
@@ -90,7 +90,7 @@ def test_launch_subset_enables_backendless_test_mode_when_skip_judge_is_set():
     class FakeRunner:
         def __init__(self, system_name, magma_config, class_specific_args, skip_backends=False):
             runner_state["init"] = (system_name, magma_config, class_specific_args, skip_backends)
-            self._benchmark_configs = [SimpleNamespace()]
+            self._scenarios = [SimpleNamespace()]
 
         def load_benchmark(self, criteria, scenarios):
             runner_state["load_benchmark"] = (criteria, scenarios)
@@ -107,7 +107,7 @@ def test_launch_subset_enables_backendless_test_mode_when_skip_judge_is_set():
 
     args = SimpleNamespace(
         scenario="demo_scenario",
-        system="MagmaSingle",
+        agent="task_state_reactive",
         config_path="/tmp/config.yaml",
         extra={"temperature": 0},
         skip_judge=True,
@@ -115,7 +115,6 @@ def test_launch_subset_enables_backendless_test_mode_when_skip_judge_is_set():
         task_indices=[0],
         videos=False,
         verifier_backend=None,
-        num_eval=None,
         magma_agent_address=None,
         sim_backend=None,
         shader=None,
@@ -129,7 +128,7 @@ def test_launch_subset_enables_backendless_test_mode_when_skip_judge_is_set():
         "path": "/tmp/config.yaml",
         "accept_no_backend": True,
     }
-    assert override_calls["value"]["benchmark"]["logs"] is True
+    assert "logs" not in override_calls["value"]["benchmark"]
     assert "skip_judge_verification" not in override_calls["value"]["benchmark"]
     assert runner_state["init"][3] is True
     assert runner_state["load_benchmark"] == (None, ["demo_scenario"])
@@ -146,7 +145,7 @@ def test_launch_subset_keeps_judge_enabled_by_default():
     runner_state = {}
 
     launch_module = types.ModuleType("magma_bench.launch")
-    launch_module.build_override_dict = lambda _args: {"benchmark": {"logs": False, "skip_judge": False}}
+    launch_module.build_override_dict = lambda _args: {"benchmark": {"skip_judge": False}}
     launch_module.resolve_config_path = lambda path: path
     sys.modules["magma_bench.launch"] = launch_module
 
@@ -173,7 +172,7 @@ def test_launch_subset_keeps_judge_enabled_by_default():
     class FakeRunner:
         def __init__(self, system_name, magma_config, class_specific_args, skip_backends=False):
             runner_state["init"] = (system_name, magma_config, class_specific_args, skip_backends)
-            self._benchmark_configs = [SimpleNamespace()]
+            self._scenarios = [SimpleNamespace()]
 
         def load_benchmark(self, criteria, scenarios):
             runner_state["load_benchmark"] = (criteria, scenarios)
@@ -190,7 +189,7 @@ def test_launch_subset_keeps_judge_enabled_by_default():
 
     args = SimpleNamespace(
         scenario="demo_scenario",
-        system="MagmaSingle",
+        agent="task_state_reactive",
         config_path="/tmp/config.yaml",
         extra={"temperature": 0},
         skip_judge=False,
@@ -198,7 +197,6 @@ def test_launch_subset_keeps_judge_enabled_by_default():
         task_indices=[0],
         videos=False,
         verifier_backend=None,
-        num_eval=None,
         magma_agent_address=None,
         sim_backend=None,
         shader=None,
@@ -212,7 +210,7 @@ def test_launch_subset_keeps_judge_enabled_by_default():
         "path": "/tmp/config.yaml",
         "accept_no_backend": False,
     }
-    assert override_calls["value"]["benchmark"]["logs"] is True
+    assert "logs" not in override_calls["value"]["benchmark"]
     assert "skip_judge" not in override_calls["value"]["benchmark"]
     assert "skip_judge_verification" not in override_calls["value"]["benchmark"]
     assert runner_state["init"][3] is False

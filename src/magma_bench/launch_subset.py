@@ -10,6 +10,12 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("scenario", type=str, help="Scenario name to evaluate.")
     parser.add_argument(
+        "--benchmark_root",
+        type=str,
+        default=None,
+        help="Directory produced by magma-bench-build.",
+    )
+    parser.add_argument(
         "--task_indices",
         nargs="+",
         type=int,
@@ -17,10 +23,10 @@ def parse_args():
         help="Indices of the scenario tasks to execute.",
     )
     parser.add_argument(
-        "--system",
+        "--agent",
         type=str,
-        default="MagmaSingle",
-        help="System class name to evaluate. Default is MagmaSingle.",
+        default="task_state_reactive",
+        help="Benchmark agent mode to evaluate.",
     )
     parser.add_argument(
         "--config_path", "-c",
@@ -39,7 +45,6 @@ def parse_args():
         type=str,
         help="Which backend instance to use for the verifier.",
     )
-    parser.add_argument("-n", "--num_eval", type=int, help="Number of evaluation per instruction.")
     parser.add_argument(
         "--magma_agent_address", "-mas",
         type=str,
@@ -79,23 +84,22 @@ def main(args: argparse.Namespace):
     override_dict["benchmark"].pop("task_indices", None)
     override_dict["benchmark"].pop("no_metrics", None)
     override_dict["benchmark"].pop("skip_judge", None)
-    override_dict["benchmark"]["logs"] = True
 
     default_path = resolve_config_path(args.config_path)
     magma_config = MAGMAConfig.load(default_path, accept_no_backend=args.skip_judge)
     magma_config.override_with_dict(override_dict)
 
     runner = BenchmarkRunner(
-        args.system,
+        args.agent,
         magma_config=magma_config,
         class_specific_args=args.extra,
         skip_backends=args.skip_judge,
     )
-    runner.load_benchmark(None, [args.scenario])
+    runner.load_benchmark(getattr(args, "benchmark_root", None), [args.scenario])
 
-    if len(runner._benchmark_configs) != 1:
+    if len(runner._scenarios) != 1:
         raise ValueError(
-            f"Scenario selection must resolve to exactly one scenario. Got {len(runner._benchmark_configs)}."
+            f"Scenario selection must resolve to exactly one scenario. Got {len(runner._scenarios)}."
         )
 
     runner.run(args)

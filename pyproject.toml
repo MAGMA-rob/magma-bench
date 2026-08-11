@@ -3,11 +3,15 @@
 
 [project]
 name = "magma_bench"
-version = "0.1.0"
+version = "1.0.0"
 description = "Benchmark code to execute and evaluate your model on the MAGMA-BENCHMARK"
 readme = "README.md"
 requires-python = ">=3.9"
-dependencies = ["magma_core>=0.1.0","magma_scenarios>=0.1.0"]
+dependencies = [
+    "magma_core>=1.0.0",
+    "magma_scenarios>=1.0.0",
+    "pydantic>=2.0",
+]
 
 [project.optional-dependencies]
 dev = ["pytest"]
