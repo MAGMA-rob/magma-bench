@@ -3,7 +3,7 @@
 
 [project]
 name = "magma_bench"
-version = "0.1.0"
+version = "1.0.0"
 description = "Benchmark code to execute and evaluate your model on the MAGMA-BENCHMARK"
 readme = "README.md"
 requires-python = ">=3.9"
