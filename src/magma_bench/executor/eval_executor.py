@@ -347,6 +347,11 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             attributes=copy.deepcopy(public_attributes),
             tool_calls=context.saved_data.tool_calls,
             forgiven_tool_calls=context.saved_data.forgiven_tool_calls,
+            defer_tool_status_on_stage_transition=(
+                not context.task_ref.get_stage_input(
+                    context.saved_data.stage_id
+                ).flag_answer_to_user
+            ),
         )
     
 
