@@ -104,7 +104,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             obs_mode,
             sim_backend,
         )
-        self._group_base_state = copy.deepcopy(self.env.get_state_dict())
+        self._group_base_state = copy.deepcopy(self.env.unwrapped.get_state_dict())
         return self.env
 
     def register(self, episode: Episode) -> EpisodeData:
@@ -125,7 +125,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             randomizer = deserialize_runtime_randomizer(episode.semantic)
 
             # set the env state to the group default one
-            env_state = copy.deepcopy(self.env.get_state_dict())
+            env_state = copy.deepcopy(self.env.unwrapped.get_state_dict())
             base_slot_state = extract_env_state_val(
                 self._group_base_state,
                 env_idx,
@@ -144,7 +144,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                 build_first_stage=True,
                 env_ids=[env_idx],
             )
-            self.env.set_state_dict(initialized_state)
+            self.env.unwrapped.set_state_dict(initialized_state)
 
             saved_data = SavedEnvData(
                 env_state=extract_env_state_val(initialized_state, env_idx),
@@ -347,11 +347,6 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             attributes=copy.deepcopy(public_attributes),
             tool_calls=context.saved_data.tool_calls,
             forgiven_tool_calls=context.saved_data.forgiven_tool_calls,
-            defer_tool_status_on_stage_transition=(
-                not context.task_ref.get_stage_input(
-                    context.saved_data.stage_id
-                ).flag_answer_to_user
-            ),
         )
     
 
@@ -367,7 +362,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
         ] = []
         retry_env_ids: List[int] = []
 
-        env_state = copy.deepcopy(self.env.get_state_dict())
+        env_state = copy.deepcopy(self.env.unwrapped.get_state_dict())
         state_changed = False
 
         for env_idx, context in self._envs.items():
@@ -393,7 +388,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             completed.append((env_idx, context, tool_context, tool_status))
 
         if state_changed:
-            self.env.set_state_dict(env_state)
+            self.env.unwrapped.set_state_dict(env_state)
             obs = self.env.unwrapped.get_obs()
 
         # MAIN VERIFICATION LOOP
@@ -505,7 +500,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             out[env_idx] = translated
 
         if state_changed:
-            self.env.set_state_dict(env_state)
+            self.env.unwrapped.set_state_dict(env_state)
         for env_idx, context, _, _ in completed:
             context.saved_data.env_state = extract_env_state_val(
                 env_state,
@@ -520,7 +515,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
     def _handle_tool_retry(self, env_ids: List[int]) -> Dict[int, ToolStatus]:
         """Restore committed states and replay answers after planner failures."""
 
-        env_state = copy.deepcopy(self.env.get_state_dict())
+        env_state = copy.deepcopy(self.env.unwrapped.get_state_dict())
         answers: Dict[int, ValidExecutionReq] = {}
         failed: Dict[int, ToolStatus] = {}
         robot_names = self.trajectory_converter.agents_name
@@ -574,7 +569,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             )
             answers[env_idx] = context.get_answer()
 
-        self.env.set_state_dict(env_state)
+        self.env.unwrapped.set_state_dict(env_state)
         if answers:
             self.compute_actions(answers)
         return failed
@@ -686,7 +681,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
         if not completed:
             return out
 
-        env_state = copy.deepcopy(self.env.get_state_dict())
+        env_state = copy.deepcopy(self.env.unwrapped.get_state_dict())
         state_changed = False
         for env_idx, status in completed.items():
             context = self._envs.get(env_idx)
@@ -728,7 +723,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             )[env_idx]
 
         if state_changed:
-            self.env.set_state_dict(env_state)
+            self.env.unwrapped.set_state_dict(env_state)
             for env_idx in completed:
                 context = self._envs.get(env_idx)
                 if context is not None:
