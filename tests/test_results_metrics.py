@@ -25,7 +25,6 @@ CONDITIONS = (
     "clean",
     "mission_update",
     "interruption",
-    "noise",
     "execution_error",
     "combined",
 )

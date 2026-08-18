@@ -9,7 +9,6 @@ RESULT_SCHEMA_VERSION = "1.0"
 NON_CLEAN_CONDITIONS = (
     "mission_update",
     "interruption",
-    "noise",
     "execution_error",
     "combined",
 )

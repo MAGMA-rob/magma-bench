@@ -19,12 +19,11 @@ from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-SCHEMA_VERSION = "1.2"
+SCHEMA_VERSION = "1.3"
 CONDITIONS = (
     "clean",
     "mission_update",
     "interruption",
-    "noise",
     "execution_error",
     "combined",
 )
@@ -48,7 +47,7 @@ class ScenarioManifest(StrictModel):
     indexed beneath this scenario.
     """
 
-    schema_version: Literal["1.2"] = SCHEMA_VERSION
+    schema_version: Literal["1.3"] = SCHEMA_VERSION
     scenario_id: str
     name: str
     track: Literal["in_domain", "held_out_domain", "compositional"]
@@ -68,7 +67,7 @@ class SkeletonManifest(StrictModel):
     The actual stage sequence is stored in each :class:`EpisodeSpec`.
     """
 
-    schema_version: Literal["1.2"] = SCHEMA_VERSION
+    schema_version: Literal["1.3"] = SCHEMA_VERSION
     skeleton_id: str
     scenario_id: str
     source_definition: str
@@ -216,7 +215,6 @@ class InterventionSpec(StrictModel):
     type: Literal[
         "mission_update",
         "interruption",
-        "noise",
         "execution_error",
         "combined",
     ]
@@ -237,7 +235,7 @@ class EpisodeSpec(StrictModel):
     metadata.
     """
 
-    schema_version: Literal["1.2"] = SCHEMA_VERSION
+    schema_version: Literal["1.3"] = SCHEMA_VERSION
     episode_id: str
     scenario_id: str
     skeleton_id: str
@@ -245,7 +243,6 @@ class EpisodeSpec(StrictModel):
         "clean",
         "mission_update",
         "interruption",
-        "noise",
         "execution_error",
         "combined",
     ]
@@ -307,7 +304,7 @@ class SemanticManifest(StrictModel):
     ensuring that clean and perturbed episodes remain paired.
     """
 
-    schema_version: Literal["1.2"] = SCHEMA_VERSION
+    schema_version: Literal["1.3"] = SCHEMA_VERSION
     semantic_id: str
     variation_index: int = Field(ge=0)
     tools: List[Dict[str, Any]]
@@ -371,7 +368,7 @@ class BenchmarkManifest(StrictModel):
     this file as authoritative and checks that the indexed files and directory
     tree match exactly.
     """
-    schema_version: Literal["1.2"] = SCHEMA_VERSION
+    schema_version: Literal["1.3"] = SCHEMA_VERSION
     benchmark_version: str
     generated_at: str
     semantic_variations: int = Field(ge=1)
