@@ -185,7 +185,11 @@ class DeclarativeStage(BaseTaskStage):
                 allow_tools_before_answer=spec.allow_tools_before_answer,
                 allowed_tools=list(spec.allowed_tools),
             ),
-            error_parameters=StageErrorParameters(possible_errors=errors),
+            error_parameters=StageErrorParameters(
+                possible_errors=errors,
+                min_active_errors=len(errors),
+                max_active_errors=len(errors),
+            ),
         )
         self.benchmark_log_rules = compile_log_rules([
             rule.model_dump(mode="python") for rule in spec.log_rules
@@ -256,12 +260,9 @@ def deserialize_serialized_stage(
     )
     stage.global_parameters.allowed_tools = list(spec.allowed_tools)
     active_errors = [deserialize_error(error) for error in spec.active_errors]
-    known_error_names = {
-        error.get_name() for error in stage.error_parameters.possible_errors
-    }
-    stage.error_parameters.possible_errors.extend(
-        error for error in active_errors if error.get_name() not in known_error_names
-    )
+    stage.error_parameters.possible_errors = active_errors
+    stage.error_parameters.min_active_errors = len(active_errors)
+    stage.error_parameters.max_active_errors = len(active_errors)
     stage.benchmark_active_error_arguments = {
         error.get_name(): dict(error_spec.runtime_arguments)
         for error, error_spec in zip(active_errors, spec.active_errors)
