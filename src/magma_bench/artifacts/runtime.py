@@ -216,6 +216,10 @@ def serialize_stage(stage: BaseTaskStage, stage_id: str) -> SerializedStageSpec:
         arguments=core_spec["arguments"],
         expected_behavior=_expected_behavior(stage),
         presentation=stage_presentation(stage),
+        reset_at_end=stage.should_reset_at_end(),
+        additive_stage=stage.is_additive_stage(),
+        allow_tools_before_answer=stage.allows_tools_before_answer(),
+        allowed_tools=list(stage.get_allowed_tools()),
         active_errors=[],
     )
 
@@ -227,8 +231,8 @@ def deserialize_serialized_stage(
 ) -> BaseTaskStage:
     """Rebuild a registered Python stage from a ``SerializedStageSpec``.
 
-    Optional presentation validation detects constructor or serialization drift
-    between benchmark generation and evaluation versions.
+    Optional validation detects constructor-argument drift and validates the
+    fully restored stage.
     """
 
     stage = BaseTaskStage.from_spec({
@@ -244,16 +248,13 @@ def deserialize_serialized_stage(
             raise ValueError(
                 f"Serialized stage {spec.id!r} arguments do not round-trip exactly"
             )
-        if stage_presentation(stage) != spec.presentation:
-            raise ValueError(
-                f"Serialized stage {spec.id!r} presentation differs from its "
-                "constructor arguments"
-            )
-        if _expected_behavior(stage) != spec.expected_behavior:
-            raise ValueError(
-                f"Serialized stage {spec.id!r} expected behavior differs from its "
-                "reconstructed stage"
-            )
+    apply_stage_presentation(stage, spec.presentation)
+    stage.global_parameters.reset_at_end = spec.reset_at_end
+    stage.global_parameters.additive_stage = spec.additive_stage
+    stage.global_parameters.allow_tools_before_answer = (
+        spec.allow_tools_before_answer
+    )
+    stage.global_parameters.allowed_tools = list(spec.allowed_tools)
     active_errors = [deserialize_error(error) for error in spec.active_errors]
     known_error_names = {
         error.get_name() for error in stage.error_parameters.possible_errors
@@ -266,7 +267,13 @@ def deserialize_serialized_stage(
         for error, error_spec in zip(active_errors, spec.active_errors)
     }
     stage.benchmark_expected_behavior = spec.expected_behavior
-    apply_stage_presentation(stage, spec.presentation)
+    if validate_presentation:
+        if _expected_behavior(stage) != spec.expected_behavior:
+            raise ValueError(
+                f"Serialized stage {spec.id!r} expected behavior differs from its "
+                "restored presentation"
+            )
+        stage.validate(["default"])
     return stage
 
 

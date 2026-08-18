@@ -88,10 +88,10 @@ def validate_metric_inputs(
             measurable_lags = [
                 lag for lag in episode.metadata.intervention_lags if lag is not None
             ]
-            if len(measurable_lags) != 1:
+            if len(measurable_lags) != len(episode.interventions):
                 raise ValueError(
                     f"Mission-update episode {episode.episode_id!r} must define "
-                    "exactly one non-null intervention lag"
+                    "one non-null intervention lag per mission update"
                 )
 
 
@@ -161,14 +161,12 @@ def compute_metrics(
             robustness_counts[episode.condition][0] += int(result.success)
 
             if episode.condition == "mission_update":
-                lag = next(
-                    lag
-                    for lag in episode.metadata.intervention_lags
-                    if lag is not None
-                )
-                lag_bucket = _lag_bucket(lag)
-                lag_counts[lag_bucket][1] += 1
-                lag_counts[lag_bucket][0] += int(result.success)
+                for lag in episode.metadata.intervention_lags:
+                    if lag is None:
+                        continue
+                    lag_bucket = _lag_bucket(lag)
+                    lag_counts[lag_bucket][1] += 1
+                    lag_counts[lag_bucket][0] += int(result.success)
 
     return MetricsPayload(
         counts=MetricCounts(

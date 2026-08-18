@@ -221,10 +221,10 @@ def load_scenarios(
                 for lag in episode_model.metadata.intervention_lags
                 if lag is not None
             ]
-            if len(measurable_lags) != 1:
+            if len(measurable_lags) != len(episode_model.interventions):
                 raise ValueError(
                     f"Mission-update episode {episode_model.episode_id!r} must "
-                    "define exactly one non-null intervention lag"
+                    "define one non-null intervention lag per mission update"
                 )
 
         episodes_by_scenario[entry.scenario_id].append(
