@@ -183,7 +183,11 @@ class DeclarativeStage(BaseTaskStage):
                 additive_stage=spec.additive,
                 verification_prompt=presentation.verification_prompt,
                 allow_tools_before_answer=spec.allow_tools_before_answer,
-                allowed_tools=list(spec.allowed_tools),
+                allowed_tools=(
+                    []
+                    if spec.allow_tools_before_answer
+                    else list(spec.allowed_tools)
+                ),
             ),
             error_parameters=StageErrorParameters(
                 possible_errors=errors,
@@ -258,7 +262,11 @@ def deserialize_serialized_stage(
     stage.global_parameters.allow_tools_before_answer = (
         spec.allow_tools_before_answer
     )
-    stage.global_parameters.allowed_tools = list(spec.allowed_tools)
+    stage.global_parameters.allowed_tools = (
+        []
+        if spec.allow_tools_before_answer
+        else list(spec.allowed_tools)
+    )
     active_errors = [deserialize_error(error) for error in spec.active_errors]
     stage.error_parameters.possible_errors = active_errors
     stage.error_parameters.min_active_errors = len(active_errors)
