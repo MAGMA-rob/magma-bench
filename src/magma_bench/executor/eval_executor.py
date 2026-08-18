@@ -446,6 +446,58 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                 tool_status.reward = stage_score
                 if stage_score < 0:
                     tool_status.stage_success = StageSuccess.FAILED
+                    tool_status.failure_reason = (
+                        "Stage verification failed: "
+                        f"env_score={env_score}, log_score={log_score}, "
+                        f"combined_score={stage_score}."
+                    )
+                    goal_scores = []
+                    for goal in task_ref.stages[stage_id].get_goals():
+                        goal_score = goal.verify(obs)[env_idx].item()
+                        goal_scores.append({
+                            "name": goal.name,
+                            "metadata": goal.metadata,
+                            "spec": goal.to_spec(),
+                            "score": goal_score,
+                        })
+                    tool_status.failure_diagnostics = {
+                        "source": "stage_verification",
+                        "stage_id": stage_id,
+                        "stage_goal_description": (
+                            task_ref.stages[stage_id].get_stage_goal_description()
+                        ),
+                        "env_score": env_score,
+                        "log_score": log_score,
+                        "combined_score": stage_score,
+                        "tool_results": [
+                            {
+                                "robot_name": robot_status.robot_name,
+                                "success": robot_status.result,
+                                "message": robot_status.mess,
+                                "error_flag": robot_status.error_flag.name,
+                            }
+                            for robot_status in tool_status.robots_status
+                        ],
+                        "goal_scores": goal_scores,
+                        "stage_logs": [
+                            {
+                                "stage_id": log.stage_id,
+                                "function": log.function,
+                                "content": repr(log.content),
+                                "action": log.action,
+                            }
+                            for log in stage_logs
+                        ],
+                        "full_logs": [
+                            {
+                                "stage_id": log.stage_id,
+                                "function": log.function,
+                                "content": repr(log.content),
+                                "action": log.action,
+                            }
+                            for log in full_logs
+                        ],
+                    }
                 elif stage_score > 0:
                     tool_status.stage_success = StageSuccess.FINISH
                     tool_status.next_input = next_input
@@ -659,6 +711,22 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             ],
             error_descriptions=[""],
             failure_reason=failure_reason,
+            failure_diagnostics=(
+                None
+                if verdict
+                else {
+                    "source": "judge",
+                    "stage_id": stage_id,
+                    "question": context.task_ref.get_stage_input(
+                        stage_id
+                    ).instruction.get_content(),
+                    "verification_prompt": context.task_ref.get_stage_rule(stage_id),
+                    "model_answer": context.get_answer().get_say(),
+                    "judge_response": judge_response,
+                    "judge_verdict": verdict,
+                    "judge_reason": failure_reason,
+                }
+            ),
             stage_id=stage_id,
             stage_success=(
                 StageSuccess.FINISH if verdict else StageSuccess.FAILED

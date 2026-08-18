@@ -25,7 +25,12 @@ class TraceEvent(ResultModel):
 
     index: int = Field(ge=0)
     stage_index: int = Field(ge=0)
-    kind: Literal["instruction", "agent_answer", "tool_feedback"]
+    kind: Literal[
+        "instruction",
+        "agent_answer",
+        "tool_feedback",
+        "failure_diagnostics",
+    ]
     payload: Dict[str, Any]
 
 

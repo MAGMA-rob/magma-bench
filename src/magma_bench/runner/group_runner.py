@@ -219,6 +219,12 @@ class GroupRunner:
 
     def _handle_terminal_status(self, env_idx: int, status: ToolStatus) -> bool:
         if status.stage_success == StageSuccess.FAILED:
+            if status.failure_diagnostics is not None:
+                self.episode_data_per_env[env_idx].record_trace(
+                    status.stage_id,
+                    "failure_diagnostics",
+                    status.failure_diagnostics,
+                )
             terminal_status = self._failure_terminal_status(status)
             self._finish_episode(
                 env_idx,

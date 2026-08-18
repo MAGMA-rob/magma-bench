@@ -91,7 +91,12 @@ class EpisodeData:
     def record_trace(
         self,
         stage_index: int,
-        kind: Literal["instruction", "agent_answer", "tool_feedback"],
+        kind: Literal[
+            "instruction",
+            "agent_answer",
+            "tool_feedback",
+            "failure_diagnostics",
+        ],
         payload: Dict[str, Any],
     ) -> TraceEvent:
         event = TraceEvent(
