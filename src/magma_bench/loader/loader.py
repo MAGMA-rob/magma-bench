@@ -8,7 +8,6 @@ from magma_core.base.skills import BaseSkill, CancelCurrentActionSkill
 from magma_core.serialization import load_spec
 
 from magma_bench.artifacts import (
-    CONDITIONS,
     BenchmarkManifest,
     CompiledEpisodeSpec,
     ScenarioManifest,
@@ -132,15 +131,6 @@ def load_scenarios(
                 f"expected {manifest.semantic_variations}"
             )
 
-    expected_conditions = set(CONDITIONS)
-    for semantic_key, conditions in conditions_by_semantic.items():
-        if conditions != expected_conditions:
-            raise ValueError(
-                f"Semantic group {semantic_key} conditions mismatch: "
-                f"missing={sorted(expected_conditions - conditions)}, "
-                f"unexpected={sorted(conditions - expected_conditions)}"
-            )
-
     skeletons: Dict[Tuple[str, str], SkeletonManifest] = {}
     semantics: Dict[Tuple[str, str, str], SemanticManifest] = {}
     episodes_by_scenario: Dict[str, List[Episode]] = {
@@ -162,6 +152,21 @@ def load_scenarios(
                 raise ValueError(f"Skeleton identity mismatch in {skeleton_path}")
             skeleton = skeleton_model
             skeletons[skeleton_key] = skeleton
+            expected_conditions = set(skeleton.conditions)
+            for semantic_id in semantics_by_skeleton[skeleton_key]:
+                semantic_key = (*skeleton_key, semantic_id)
+                actual_conditions = conditions_by_semantic.get(semantic_key, set())
+                if actual_conditions != expected_conditions:
+                    raise ValueError(
+                        f"Semantic group {semantic_key} conditions mismatch: "
+                        f"missing={sorted(expected_conditions - actual_conditions)}, "
+                        f"unexpected={sorted(actual_conditions - expected_conditions)}"
+                    )
+        if entry.track != skeleton.track:
+            raise ValueError(
+                f"Episode index track mismatch for {entry.path}: "
+                f"expected {skeleton.track!r}, got {entry.track!r}"
+            )
 
         semantic_key = (*skeleton_key, entry.semantic_id)
         semantic = semantics.get(semantic_key)
@@ -231,6 +236,7 @@ def load_scenarios(
             Episode(
                 episode_id=episode_model.episode_id,
                 skeleton_id=episode_model.skeleton_id,
+                track=skeleton.track,
                 condition=episode_model.condition,
                 # All conditions and semantics of a skeleton share this
                 # read-only source initialization. Execution will copy it when
@@ -260,6 +266,7 @@ def load_scenarios(
             control_scenario_id != scenario_id
             or control.condition != "clean"
             or control.skeleton_id != episode.skeleton_id
+            or control.track != episode.track
             or control.semantic.semantic_id != episode.semantic.semantic_id
         ):
             raise ValueError(
@@ -297,7 +304,6 @@ def load_scenarios(
             Scenario(
                 scenario_id=scenario.scenario_id,
                 name=scenario.name,
-                track=scenario.track,
                 environment_id=scenario.environment_id,
                 tools_cls=tools_cls,
                 skill_types=skill_types,

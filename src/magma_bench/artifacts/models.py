@@ -19,7 +19,21 @@ from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-SCHEMA_VERSION = "1.4"
+SCHEMA_VERSION = "1.6"
+Track = Literal["in_domain", "held_out_domain", "compositional"]
+Condition = Literal[
+    "clean",
+    "mission_update",
+    "interruption",
+    "execution_error",
+    "combined",
+]
+ArtifactSchemaVersion = Literal["1.5", "1.6"]
+VariantCondition = Literal[
+    "mission_update",
+    "interruption",
+    "execution_error",
+]
 CONDITIONS = (
     "clean",
     "mission_update",
@@ -42,15 +56,14 @@ class StrictModel(BaseModel):
 class ScenarioManifest(StrictModel):
     """Stable metadata shared by every episode of one scenario.
 
-    A scenario identifies a semantic domain and its simulator environment. It
-    does not contain task stages: those belong to the skeletons and episodes
-    indexed beneath this scenario.
+    A scenario identifies a semantic domain and its simulator environment.
+    Tracks belong to skeletons because one domain may contain tasks from
+    different evaluation tracks.
     """
 
-    schema_version: Literal["1.4"] = SCHEMA_VERSION
+    schema_version: ArtifactSchemaVersion = SCHEMA_VERSION
     scenario_id: str
     name: str
-    track: Literal["in_domain", "held_out_domain", "compositional"]
     definition: str
     environment_id: str
     tools_type: str
@@ -64,12 +77,16 @@ class SkeletonManifest(StrictModel):
     A skeleton is the common task instance from which all experimental
     conditions and semantic variations are derived. ``initialization`` is the
     canonical environment configuration/state needed to start its episodes.
-    The actual stage sequence is stored in each :class:`EpisodeSpec`.
+    The actual stage sequence is stored in each :class:`EpisodeSpec`. The
+    skeleton track applies to every condition and semantic variation derived
+    from it.
     """
 
-    schema_version: Literal["1.4"] = SCHEMA_VERSION
+    schema_version: ArtifactSchemaVersion = SCHEMA_VERSION
     skeleton_id: str
     scenario_id: str
+    track: Track
+    conditions: List[Condition] = Field(default_factory=lambda: list(CONDITIONS))
     source_definition: str
     definition_arguments: Dict[str, Any] = Field(default_factory=dict)
     generation_seed: int
@@ -79,10 +96,25 @@ class SkeletonManifest(StrictModel):
 
     @model_validator(mode="after")
     def validate_range(self) -> "SkeletonManifest":
+        if self.schema_version == "1.6" and "conditions" not in self.model_fields_set:
+            raise ValueError("Schema 1.6 skeletons must declare conditions")
         if len(self.requested_tool_call_range) != 2:
             raise ValueError("requested_tool_call_range must contain [minimum, maximum]")
         if self.requested_tool_call_range[0] > self.requested_tool_call_range[1]:
             raise ValueError("requested_tool_call_range has reversed bounds")
+        if len(set(self.conditions)) != len(self.conditions):
+            raise ValueError("Skeleton conditions must be unique")
+        if "clean" not in self.conditions:
+            raise ValueError("Skeleton conditions must include clean")
+        combined_expected = {
+            "mission_update",
+            "execution_error",
+        }.issubset(self.conditions)
+        if ("combined" in self.conditions) != combined_expected:
+            raise ValueError(
+                "combined must be present if and only if mission_update and "
+                "execution_error are present"
+            )
         return self
 
 
@@ -245,7 +277,7 @@ class EpisodeSpec(StrictModel):
     metadata.
     """
 
-    schema_version: Literal["1.4"] = SCHEMA_VERSION
+    schema_version: ArtifactSchemaVersion = SCHEMA_VERSION
     episode_id: str
     scenario_id: str
     skeleton_id: str
@@ -314,7 +346,7 @@ class SemanticManifest(StrictModel):
     ensuring that clean and perturbed episodes remain paired.
     """
 
-    schema_version: Literal["1.4"] = SCHEMA_VERSION
+    schema_version: ArtifactSchemaVersion = SCHEMA_VERSION
     semantic_id: str
     variation_index: int = Field(ge=0)
     tools: List[Dict[str, Any]]
@@ -358,13 +390,15 @@ class CompiledEpisodeSpec(EpisodeSpec):
 class EpisodeIndexEntry(StrictModel):
     """Lightweight pointer from ``benchmark.json`` to one episode JSON file.
 
-    Identity fields are duplicated intentionally so the loader can detect a
-    misplaced, stale or incorrectly generated file before evaluation starts.
+    Identity fields and the skeleton track are duplicated intentionally so the
+    loader can detect a misplaced, stale or incorrectly generated file before
+    evaluation starts.
     """
 
     episode_id: str
     scenario_id: str
     skeleton_id: str
+    track: Track
     semantic_id: str
     condition: str
     length_bucket: str
@@ -378,7 +412,7 @@ class BenchmarkManifest(StrictModel):
     this file as authoritative and checks that the indexed files and directory
     tree match exactly.
     """
-    schema_version: Literal["1.4"] = SCHEMA_VERSION
+    schema_version: ArtifactSchemaVersion = SCHEMA_VERSION
     benchmark_version: str
     generated_at: str
     semantic_variations: int = Field(ge=1)

@@ -17,9 +17,31 @@ from .models import (
     BenchmarkResult,
     EpisodeOutcome,
     EpisodeResult,
+    MetricsPayload,
     RunManifest,
     ScenarioResult,
 )
+
+
+def _compute_metrics_by_track(
+    bindings: Sequence[EpisodeBinding],
+    results: Dict[str, EpisodeResult],
+) -> Dict[str, MetricsPayload]:
+    metrics_by_track = {}
+    tracks = sorted({episode.track for _, episode in bindings})
+    for track in tracks:
+        track_bindings = [
+            binding for binding in bindings if binding[1].track == track
+        ]
+        track_results = {
+            episode.episode_id: results[episode.episode_id]
+            for _, episode in track_bindings
+        }
+        metrics_by_track[track] = compute_metrics(
+            track_bindings,
+            track_results,
+        )
+    return metrics_by_track
 
 
 def benchmark_fingerprint(root: Path, manifest: BenchmarkManifest) -> str:
@@ -233,8 +255,8 @@ class ResultManager:
         ]
         scenario_result = ScenarioResult(
             scenario_id=scenario.scenario_id,
-            track=scenario.track,
             metrics=compute_metrics(bindings, results),
+            metrics_by_track=_compute_metrics_by_track(bindings, results),
         )
         _write_model_atomic(partial_path / "result.json", scenario_result)
         completed_path = self._completed_scenario_path(scenario.scenario_id)
@@ -261,7 +283,11 @@ class ResultManager:
             all_results.update(results)
 
         benchmark_result = BenchmarkResult(
-            metrics=compute_metrics(all_bindings, all_results)
+            metrics=compute_metrics(all_bindings, all_results),
+            metrics_by_track=_compute_metrics_by_track(
+                all_bindings,
+                all_results,
+            ),
         )
         _write_model_atomic(self.results_path / "result.json", benchmark_result)
         return benchmark_result
@@ -279,7 +305,7 @@ class ResultManager:
         stored = ScenarioResult.model_validate_json(
             result_path.read_text(encoding="utf-8")
         )
-        if stored.scenario_id != scenario.scenario_id or stored.track != scenario.track:
+        if stored.scenario_id != scenario.scenario_id:
             raise ValueError(
                 f"Stored scenario result does not match {scenario.scenario_id!r}"
             )
@@ -291,6 +317,15 @@ class ResultManager:
         if stored.metrics != expected_metrics:
             raise ValueError(
                 f"Stored metrics are stale or corrupted for {scenario.scenario_id!r}"
+            )
+        expected_metrics_by_track = _compute_metrics_by_track(
+            [(scenario.scenario_id, episode) for episode in scenario.episodes],
+            results,
+        )
+        if stored.metrics_by_track != expected_metrics_by_track:
+            raise ValueError(
+                "Stored track metrics are stale or corrupted for "
+                f"{scenario.scenario_id!r}"
             )
         return results
 

@@ -4,8 +4,10 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ..artifacts.models import Track
 
-RESULT_SCHEMA_VERSION = "1.0"
+
+RESULT_SCHEMA_VERSION = "1.1"
 NON_CLEAN_CONDITIONS = (
     "mission_update",
     "interruption",
@@ -72,7 +74,7 @@ class EpisodeOutcome(ResultModel):
 
 
 class EpisodeResult(EpisodeOutcome):
-    schema_version: Literal["1.0"] = RESULT_SCHEMA_VERSION
+    schema_version: Literal["1.1"] = RESULT_SCHEMA_VERSION
 
 
 class Rate(ResultModel):
@@ -116,15 +118,16 @@ class MetricsPayload(ResultModel):
 
 
 class ScenarioResult(ResultModel):
-    schema_version: Literal["1.0"] = RESULT_SCHEMA_VERSION
+    schema_version: Literal["1.1"] = RESULT_SCHEMA_VERSION
     scenario_id: str
-    track: str
     metrics: MetricsPayload
+    metrics_by_track: Dict[Track, MetricsPayload]
 
 
 class BenchmarkResult(ResultModel):
-    schema_version: Literal["1.0"] = RESULT_SCHEMA_VERSION
+    schema_version: Literal["1.1"] = RESULT_SCHEMA_VERSION
     metrics: MetricsPayload
+    metrics_by_track: Dict[Track, MetricsPayload]
 
 
 class AgentIdentity(ResultModel):
@@ -134,7 +137,7 @@ class AgentIdentity(ResultModel):
 
 
 class RunManifest(ResultModel):
-    schema_version: Literal["1.0"] = RESULT_SCHEMA_VERSION
+    schema_version: Literal["1.1"] = RESULT_SCHEMA_VERSION
     benchmark_version: str
     benchmark_fingerprint: str
     agent: AgentIdentity

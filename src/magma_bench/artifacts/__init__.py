@@ -1,5 +1,6 @@
 from .models import (
     CONDITIONS,
+    Condition,
     ActiveErrorSpec,
     BenchmarkManifest,
     CompiledEpisodeSpec,
@@ -15,6 +16,8 @@ from .models import (
     SemanticManifest,
     SerializedStageSpec,
     SkeletonManifest,
+    Track,
+    VariantCondition,
     StageInputSpec,
     StagePresentationSpec,
     StageSpec,
@@ -38,6 +41,7 @@ from .runtime import (
 
 __all__ = [
     "CONDITIONS",
+    "Condition",
     "ActiveErrorSpec",
     "BenchmarkManifest",
     "CompiledEpisodeSpec",
@@ -54,6 +58,8 @@ __all__ = [
     "SemanticManifest",
     "SerializedStageSpec",
     "SkeletonManifest",
+    "Track",
+    "VariantCondition",
     "StageInputSpec",
     "StagePresentationSpec",
     "StageSpec",

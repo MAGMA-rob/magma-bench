@@ -16,6 +16,7 @@ from magma_bench.artifacts import (
     InterventionSpec,
     SemanticManifest,
     StageSpec,
+    Track,
 )
 
 
@@ -25,6 +26,7 @@ class Episode:
 
     episode_id: str
     skeleton_id: str
+    track: Track
     condition: str
     initialization: Dict[str, Any]
     stages: Tuple[StageSpec, ...]
@@ -35,11 +37,10 @@ class Episode:
 
 @dataclass(frozen=True)
 class Scenario:
-    """A benchmark domain and the compiled episodes evaluated within it."""
+    """A benchmark domain whose skeletons may belong to different tracks."""
 
     scenario_id: str
     name: str
-    track: str
     environment_id: str
     tools_cls: Type[BaseToolsAPI]
     skill_types: Tuple[Type[BaseSkill], ...]

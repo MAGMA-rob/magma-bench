@@ -60,6 +60,11 @@ def _build_fixture():
                 episode = SimpleNamespace(
                     episode_id=episode_id,
                     skeleton_id=skeleton_id,
+                    track=(
+                        "in_domain"
+                        if skeleton_id == "skeleton_a"
+                        else "compositional"
+                    ),
                     condition=condition,
                     semantic=SimpleNamespace(semantic_id=semantic_id),
                     metadata=SimpleNamespace(
@@ -126,6 +131,29 @@ def test_metrics_reject_missing_pairs_and_ambiguous_update_lag():
     update.metadata.intervention_lags = [2, 8]
     with pytest.raises(ValueError, match="exactly one non-null"):
         compute_metrics(bindings, results)
+
+
+def test_metrics_allow_conditions_on_only_eligible_skeletons():
+    bindings, results = _build_fixture()
+    bindings = [
+        binding
+        for binding in bindings
+        if not (
+            binding[1].skeleton_id == "skeleton_b"
+            and binding[1].condition == "interruption"
+        )
+    ]
+    results = {
+        episode_id: result
+        for episode_id, result in results.items()
+        if not episode_id.startswith("skeleton_b.")
+        or not episode_id.endswith(".interruption")
+    }
+
+    metrics = compute_metrics(bindings, results)
+
+    assert metrics.success_rate_by_condition["interruption"].denominator == 2
+    assert metrics.success_rate_by_condition["interruption"].value == 1.0
 
 
 def test_episode_models_are_strict_and_preserve_last_action_reference():
@@ -212,7 +240,6 @@ def _manager_fixture(tmp_path):
     episodes = tuple(episode for _, episode in bindings)
     scenario = SimpleNamespace(
         scenario_id="scenario_a",
-        track="in_domain",
         episodes=episodes,
     )
     agent = {
@@ -246,7 +273,12 @@ def test_result_manager_saves_scenario_and_resumes(tmp_path):
     benchmark_result = manager.finish_benchmark()
 
     assert scenario_result.metrics.clean_success_rate.value == 1.0
+    assert set(scenario_result.metrics_by_track) == {
+        "in_domain",
+        "compositional",
+    }
     assert benchmark_result.metrics.counts.episode_count == 24
+    assert benchmark_result.metrics_by_track["in_domain"].counts.skeleton_count == 1
     assert (results_path / "result.json").is_file()
     assert (results_path / "scenarios" / "scenario_a" / "result.json").is_file()
 
