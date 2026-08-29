@@ -12,7 +12,7 @@ NON_CLEAN_CONDITIONS = (
     "execution_error",
     "combined",
 )
-LENGTH_BUCKETS = ("short", "medium", "long", "very_long")
+LENGTH_BUCKETS = ("short", "mid", "long", "very-long", "extreme")
 LAG_BUCKETS = ("0-3", "4-9", "10-19", "20+")
 
 
