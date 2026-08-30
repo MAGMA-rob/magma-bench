@@ -198,7 +198,7 @@ class DeclarativeStage(BaseTaskStage):
         self.benchmark_log_rules = compile_log_rules([
             rule.model_dump(mode="python") for rule in spec.log_rules
         ])
-        self.benchmark_active_error_arguments = {
+        self.active_error_arguments_override = {
             error.get_name(): dict(error_spec.runtime_arguments)
             for error, error_spec in zip(errors, spec.active_errors)
         }
@@ -271,7 +271,7 @@ def deserialize_serialized_stage(
     stage.error_parameters.possible_errors = active_errors
     stage.error_parameters.min_active_errors = len(active_errors)
     stage.error_parameters.max_active_errors = len(active_errors)
-    stage.benchmark_active_error_arguments = {
+    stage.active_error_arguments_override = {
         error.get_name(): dict(error_spec.runtime_arguments)
         for error, error_spec in zip(active_errors, spec.active_errors)
     }
