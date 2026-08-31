@@ -248,6 +248,15 @@ class ResultManager:
             raise RuntimeError(f"Scenario {scenario_id!r} is not active")
         return set(self._pending_episode_ids)
 
+    def video_directory(self, scenario_id: str) -> Path:
+        """Return the video directory that follows one partial scenario."""
+
+        if self.active_scenario_id != scenario_id:
+            raise RuntimeError(f"Scenario {scenario_id!r} is not active")
+        path = self._partial_scenario_path(scenario_id) / "videos"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
     def record_episode(self, outcome: EpisodeOutcome) -> None:
         if self.active_scenario_id is None:
             raise RuntimeError("No scenario is active")

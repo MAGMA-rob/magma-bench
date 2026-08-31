@@ -1,5 +1,7 @@
 from concurrent.futures import Future
 import json
+from pathlib import Path
+import sys
 import threading
 from types import SimpleNamespace
 
@@ -37,6 +39,8 @@ from magma_bench.data_structures import (
 from magma_bench.runner import group_runner as group_runner_module
 from magma_bench.runner.group_runner import GroupRunner
 from magma_bench.executor.eval_executor import ToolsEvalExecutor
+from magma_bench.executor.context import PlannerRetryEvent
+from magma_bench.video import EpisodeVideoRecorder, VideoConfig
 
 
 class FakeInstruction:
@@ -392,3 +396,240 @@ def test_skip_judge_queues_a_success_without_worker():
 
     assert context.judge_pending is True
     assert executor._judge_done[0].stage_success == StageSuccess.FINISH
+
+
+def test_planner_terminal_retry_keeps_a_runtime_event():
+    executor = ToolsEvalExecutor.__new__(ToolsEvalExecutor)
+    executor._planner_runtime_events = []
+    executor.trajectory_converter = SimpleNamespace(agents_name=["robot"])
+    executor.env = SimpleNamespace(
+        unwrapped=SimpleNamespace(
+            get_state_dict=lambda: {},
+            set_state_dict=lambda _state: None,
+        )
+    )
+    context = SimpleNamespace(
+        planner_retry_count=10,
+        saved_data=SimpleNamespace(
+            stage_id=2,
+            attributes={},
+            tool_calls=3,
+            forgiven_tool_calls=0,
+        ),
+        randomizer=SimpleNamespace(traduce_end=lambda statuses: statuses),
+    )
+    executor._envs = {0: context}
+
+    failed = executor._handle_tool_retry({0: "planner blocked by collision"})
+    events = executor.drain_planner_runtime_events()
+
+    assert failed[0].stage_success == StageSuccess.FAILED
+    assert events == [
+        PlannerRetryEvent(
+            env_idx=0,
+            attempt=10,
+            max_attempts=10,
+            message="planner blocked by collision",
+        )
+    ]
+
+
+class FakeRenderedEnvironment:
+    def __init__(self, frames):
+        self.frames = frames
+        self.render_calls = 0
+
+    def render_rgb_array(self):
+        self.render_calls += 1
+        return self.frames
+
+
+class FakeVideoWriter:
+    def __init__(self, path, written_frames):
+        self.path = Path(path)
+        self.written_frames = written_frames
+        self.seeded = False
+
+    def send(self, frame):
+        if frame is None:
+            self.seeded = True
+            return
+        assert self.seeded
+        self.written_frames.append(frame.copy())
+
+    def close(self):
+        self.path.write_bytes(b"fake-video")
+
+
+def _video_recorder(monkeypatch, tmp_path, frames, fps=2, hold_seconds=0.5):
+    writers = []
+
+    def write_frames(path, _size, **_kwargs):
+        written_frames = []
+        writers.append(written_frames)
+        return FakeVideoWriter(path, written_frames)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "imageio_ffmpeg",
+        SimpleNamespace(write_frames=write_frames),
+    )
+    recorder = EpisodeVideoRecorder(
+        VideoConfig(enabled=True, fps=fps, hold_seconds=hold_seconds)
+    )
+    video_directory = tmp_path / "videos"
+    recorder.start_scenario(video_directory)
+    environment = FakeRenderedEnvironment(frames)
+    recorder.bind_environment(environment)
+    return recorder, environment, writers, video_directory
+
+
+def test_video_recorder_splits_vector_frames_and_recycles_slot(
+    monkeypatch,
+    tmp_path,
+):
+    numpy = pytest.importorskip("numpy")
+    frames = numpy.zeros((2, 32, 48, 3), dtype=numpy.uint8)
+    frames[0, ..., 0] = 40
+    frames[1, ..., 1] = 80
+    recorder, environment, writers, video_directory = _video_recorder(
+        monkeypatch,
+        tmp_path,
+        frames,
+    )
+    recorder.start_episode(0, "episode_0", 0, "USER", "first")
+    recorder.start_episode(1, "episode_1", 1, "SYSTEM", "second")
+    recorder.update_instruction(0, 0, "USER", "first")
+    recorder.update_instruction(1, 1, "SYSTEM", "second")
+
+    recorder.flush_holds()
+
+    assert environment.render_calls == 1
+    assert len(writers) == 2
+    assert tuple(writers[0][0][10, 10]) == (40, 0, 0)
+    assert tuple(writers[1][0][10, 10]) == (0, 80, 0)
+    assert writers[0][0].shape == (272, 48, 3)
+
+    recorder.finish_episode(0, "success")
+    recorder.start_episode(0, "episode_2", 2, "USER", "recycled")
+    recorder.update_instruction(0, 2, "USER", "recycled")
+    recorder.flush_holds([0])
+    recorder.finish_episode(0, "stage_failure")
+    recorder.finish_episode(1, "success")
+
+    assert (video_directory / "episode_0.mp4").is_file()
+    assert (video_directory / "episode_1.mp4").is_file()
+    assert (video_directory / "episode_2.mp4").is_file()
+    manifest = json.loads(
+        (video_directory / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["episodes"]["episode_2"]["terminal_status"] == "stage_failure"
+
+
+def test_video_recorder_holds_context_and_draws_planner_banner(
+    monkeypatch,
+    tmp_path,
+):
+    numpy = pytest.importorskip("numpy")
+    frames = numpy.zeros((1, 32, 64, 3), dtype=numpy.uint8)
+    recorder, _, writers, _ = _video_recorder(
+        monkeypatch,
+        tmp_path,
+        frames,
+        fps=4,
+        hold_seconds=1.0,
+    )
+    recorder.start_episode(0, "episode", 3, "USER", "instruction")
+    recorder.update_instruction(0, 3, "USER", "instruction")
+    recorder.flush_holds()
+    assert len(writers[0]) == 4
+
+    say = ValidAgentAnswer(0, 1, "Waiting for confirmation", [])
+    recorder.update_answer(0, say, hold=True)
+    recorder.flush_holds()
+    assert len(writers[0]) == 8
+    assert recorder._sessions[0].activity_label == "Current answer"
+
+    cancel = ValidAgentAnswer(
+        0,
+        2,
+        "",
+        [Call("cancel_current_action", {}, "robot")],
+    )
+    recorder.update_answer(0, cancel, hold=True)
+    previous_activity = recorder._sessions[0].activity
+    recorder.update_instruction(
+        0,
+        3,
+        "USER",
+        "Interruption: stop and inspect the tray",
+    )
+    recorder.flush_holds()
+    assert len(writers[0]) == 16
+    assert recorder._sessions[0].activity == previous_activity
+
+    recorder.set_planner_retry(0, 4, 10, "path unavailable")
+    recorder.flush_holds()
+
+    assert len(writers[0]) == 20
+    assert tuple(writers[0][-1][5, 5]) == (190, 20, 20)
+    recorder.clear_planner_retry(0)
+    recorder.capture_physical_step([0])
+    assert tuple(writers[0][-1][5, 5]) == (0, 0, 0)
+    recorder.finish_episode(0, "infrastructure_failure")
+
+
+def test_disabled_video_recorder_never_renders():
+    recorder = EpisodeVideoRecorder(VideoConfig(enabled=False))
+    environment = FakeRenderedEnvironment(None)
+
+    recorder.bind_environment(environment)
+    recorder.start_episode(0, "episode", 0, "USER", "instruction")
+    recorder.capture_physical_step([0])
+    recorder.flush_holds()
+    recorder.finish_episode(0, "success")
+
+    assert environment.render_calls == 0
+
+
+class FailingVideoRecorder:
+    config = VideoConfig(enabled=False)
+
+    def start_episode(self, *_args, **_kwargs):
+        pass
+
+    def update_instruction(self, *_args, **_kwargs):
+        pass
+
+    def update_answer(self, *_args, **_kwargs):
+        pass
+
+    def finish_episode(self, _env_idx, _terminal_status):
+        raise RuntimeError("video encoding failed")
+
+
+def test_video_failure_prevents_episode_outcome_persistence(monkeypatch):
+    monkeypatch.setattr(group_runner_module, "SkillManager", FakeSkillManager)
+    outcomes = []
+    runner = GroupRunner(
+        scenario=SimpleNamespace(skill_types=()),
+        group=FakeEpisodeGroup(),
+        executor_ref=FakeExecutor(),
+        on_episode_finished=outcomes.append,
+        video_recorder=FailingVideoRecorder(),
+    )
+    runner.tick({}, [])
+    answer = BadAgentAnswer(0, 0, "", "invalid", "invalid JSON")
+
+    with pytest.raises(RuntimeError, match="video encoding failed"):
+        runner.tick(
+            {},
+            [
+                BenchmarkAgentResult(
+                    answer=answer,
+                    situation=runner.episode_data_per_env[0].situation,
+                )
+            ],
+        )
+
+    assert outcomes == []

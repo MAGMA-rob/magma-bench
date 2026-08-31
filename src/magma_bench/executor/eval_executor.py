@@ -46,7 +46,13 @@ from magma_bench.data_structures import (
 )
 from magma_bench.loader import EpisodeGroup
 
-from .context import EvalEpisodeContext, EvalSkillAPIProvider
+from .context import (
+    EvalEpisodeContext,
+    EvalSkillAPIProvider,
+    PlannerRetryEvent,
+    PlannerRetryResolvedEvent,
+    PlannerRuntimeEvent,
+)
 from .episode_runtime import build_episode_task
 
 
@@ -78,6 +84,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
         self._judge_done: Dict[int, ToolStatus] = {}
         self._immediate_done: Dict[int, ToolStatus] = {}
         self._fatal_error: Optional[RuntimeError] = None
+        self._planner_runtime_events: List[PlannerRuntimeEvent] = []
         self.skip_judge = skip_judge
         self.lock = threading.Lock()
 
@@ -103,6 +110,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             self._judge_done.clear()
             self._immediate_done.clear()
             self._fatal_error = None
+            self._planner_runtime_events.clear()
 
         self.env = self._create_envs(
             scenario.environment_id,
@@ -284,9 +292,10 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                     forgiven_tool_calls=context.saved_data.forgiven_tool_calls,
                 )
                 with self.lock:
-                    self._immediate_done[env_idx] = context.randomizer.traduce_end(
-                        {env_idx: canonical}
-                    )[env_idx]
+                    self._immediate_done[env_idx] = self._translate_status_to_public(
+                        env_idx,
+                        canonical,
+                    )
                 continue
 
             saved_data = context.saved_data
@@ -332,6 +341,22 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             context.tool_context is not None
             for context in self._envs.values()
         )
+
+    def get_active_tool_env_ids(self) -> List[int]:
+        """Return slots whose physical tool contributes video frames."""
+
+        return [
+            env_idx
+            for env_idx, context in self._envs.items()
+            if context.tool_context is not None
+        ]
+
+    def drain_planner_runtime_events(self) -> List[PlannerRuntimeEvent]:
+        """Consume planner retry events produced on the main execution thread."""
+
+        events = self._planner_runtime_events
+        self._planner_runtime_events = []
+        return events
 
     def get_skill_api_provider(self, env_idx: int) -> SkillAPIProvider:
         """Build the skill API provider for the episode occupying a slot."""
@@ -389,7 +414,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
         completed: List[
             Tuple[int, EvalEpisodeContext, EnvToolContext, ToolStatus]
         ] = []
-        retry_env_ids: List[int] = []
+        retry_failures: Dict[int, str] = {}
 
         env_state = copy.deepcopy(self.env.unwrapped.get_state_dict())
         state_changed = False
@@ -405,7 +430,13 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             tool_status = tool_context.build_tool_status()
             if tool_status.should_restore_source_env_state():
                 context.tool_context = None
-                retry_env_ids.append(env_idx)
+                retry_messages = [
+                    robot_status.mess
+                    for robot_status in tool_status.robots_status
+                    if robot_status.error_flag == ToolErrorFlag.PLANNER_ERROR
+                    and robot_status.mess
+                ]
+                retry_failures[env_idx] = "\n".join(retry_messages)
                 continue
             
             # Apply possible state changement (move_to, object state changement)
@@ -572,12 +603,14 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                 saved_data.forgiven_tool_calls = tool_context.forgiven_tool_calls
                 saved_data.active_stage_error_state = tool_context.error_state
                 saved_data.composite_progress = tool_context.composite_progress
+            if context.planner_retry_count > 0:
+                self._planner_runtime_events.append(
+                    PlannerRetryResolvedEvent(env_idx=env_idx)
+                )
             context.planner_retry_count = 0
             context.tool_context = None
 
-            translated = context.randomizer.traduce_end(
-                {env_idx: tool_status}
-            )[env_idx]
+            translated = self._translate_status_to_public(env_idx, tool_status)
             out[env_idx] = translated
 
         if state_changed:
@@ -588,12 +621,15 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                 env_idx,
             )
 
-        if retry_env_ids:
-            out.update(self._handle_tool_retry(retry_env_ids))
+        if retry_failures:
+            out.update(self._handle_tool_retry(retry_failures))
 
         return out
 
-    def _handle_tool_retry(self, env_ids: List[int]) -> Dict[int, ToolStatus]:
+    def _handle_tool_retry(
+        self,
+        retry_failures: Dict[int, str],
+    ) -> Dict[int, ToolStatus]:
         """Restore committed states and replay answers after planner failures."""
 
         env_state = copy.deepcopy(self.env.unwrapped.get_state_dict())
@@ -601,9 +637,17 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
         failed: Dict[int, ToolStatus] = {}
         robot_names = self.trajectory_converter.agents_name
 
-        for env_idx in env_ids:
+        for env_idx, planner_message in retry_failures.items():
             context = self._envs[env_idx]
             if context.planner_retry_count >= 10:
+                self._planner_runtime_events.append(
+                    PlannerRetryEvent(
+                        env_idx=env_idx,
+                        attempt=10,
+                        max_attempts=10,
+                        message=planner_message,
+                    )
+                )
                 canonical = ToolStatus(
                     robots_status=[
                         RobotToolStatus(
@@ -621,11 +665,20 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                     tool_calls=context.saved_data.tool_calls,
                     forgiven_tool_calls=context.saved_data.forgiven_tool_calls,
                 )
-                failed[env_idx] = context.randomizer.traduce_end(
-                    {env_idx: canonical}
-                )[env_idx]
+                failed[env_idx] = self._translate_status_to_public(
+                    env_idx,
+                    canonical,
+                )
                 continue
             context.planner_retry_count += 1
+            self._planner_runtime_events.append(
+                PlannerRetryEvent(
+                    env_idx=env_idx,
+                    attempt=context.planner_retry_count,
+                    max_attempts=10,
+                    message=planner_message,
+                )
+            )
             restored_state = copy.deepcopy(context.saved_data.env_state)
             current_state = extract_env_state_val(env_state, env_idx)
 
@@ -670,9 +723,37 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             forgiven_tool_calls=context.saved_data.forgiven_tool_calls,
         )
         with self.lock:
-            self._immediate_done[env_idx] = context.randomizer.traduce_end(
+            self._immediate_done[env_idx] = self._translate_status_to_public(
+                env_idx,
+                status,
+            )
+
+    def _translate_status_to_public(
+        self,
+        env_idx: int,
+        status: ToolStatus,
+    ) -> ToolStatus:
+        """Translate runtime results without translating persisted stage input twice.
+
+        Compiled benchmark stage presentations are already expressed in the
+        episode's public vocabulary.  ``RuntimeRandomizer.traduce_end`` normally
+        receives canonical task stages and therefore translates ``next_input``.
+        Temporarily detaching it preserves the benchmark presentation while the
+        status messages and canonical attributes still follow the normal core
+        translation path.
+        """
+
+        context = self._envs[env_idx]
+        next_input = status.next_input
+        status.next_input = None
+        try:
+            translated = context.randomizer.traduce_end(
                 {env_idx: status}
             )[env_idx]
+        finally:
+            status.next_input = next_input
+        translated.next_input = next_input
+        return translated
 
     def _submit_judge(self, env_idx: int, retry: bool = False) -> None:
         """Submit one text-only answer using its environment as identifier."""
@@ -858,9 +939,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             )
             context.judge_attempt_count = 0
             context.judge_pending = False
-            out[env_idx] = context.randomizer.traduce_end(
-                {env_idx: status}
-            )[env_idx]
+            out[env_idx] = self._translate_status_to_public(env_idx, status)
 
         if state_changed:
             self.env.unwrapped.set_state_dict(env_state)

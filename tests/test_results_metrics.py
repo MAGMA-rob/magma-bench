@@ -292,6 +292,8 @@ def test_result_manager_replays_partial_and_rejects_incompatible_agent(tmp_path)
     results_path = tmp_path / "results"
     manager = ResultManager(results_path, benchmark_root, agent, [scenario])
     assert manager.start_scenario(scenario) is True
+    video_directory = manager.video_directory("scenario_a")
+    (video_directory / "preserved.mp4").write_bytes(b"existing-video")
     manager.record_episode(_outcome(scenario.episodes[0].episode_id))
 
     resumed = ResultManager(results_path, benchmark_root, agent, [scenario])
@@ -301,6 +303,7 @@ def test_result_manager_replays_partial_and_rejects_incompatible_agent(tmp_path)
     assert (partial_episodes / f"{completed_episode_id}.json").is_file()
     assert completed_episode_id not in resumed.pending_episode_ids("scenario_a")
     assert len(resumed.pending_episode_ids("scenario_a")) == 23
+    assert (resumed.video_directory("scenario_a") / "preserved.mp4").is_file()
 
     incompatible = dict(agent)
     incompatible["agent"] = "another-agent"

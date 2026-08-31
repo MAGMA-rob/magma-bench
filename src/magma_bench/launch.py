@@ -58,6 +58,22 @@ def parse_args():
     )
     parser.add_argument("--seed", type=int, help="The default start seed (default = 42)")
     parser.add_argument(
+        "--videos",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Record one annotated MP4 per executed episode.",
+    )
+    parser.add_argument(
+        "--video_fps",
+        type=int,
+        help="Annotated video frame rate (default: 20).",
+    )
+    parser.add_argument(
+        "--video_hold_seconds",
+        type=float,
+        help="Duration of non-physical video events (default: 1 second).",
+    )
+    parser.add_argument(
         "--skip_judge",
         action="store_true",
         help="Auto-validate text answers without starting a judge backend.",

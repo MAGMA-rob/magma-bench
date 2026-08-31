@@ -31,6 +31,7 @@ from magma_bench.data_structures import (
 from magma_bench.executor import ToolsEvalExecutor
 from magma_bench.loader import EpisodeGroup
 from magma_bench.results.models import EpisodeOutcome, EpisodeTerminal
+from magma_bench.video import EpisodeVideoRecorder, VideoConfig
 
 
 @dataclass(frozen=True)
@@ -56,11 +57,15 @@ class GroupRunner:
         on_episode_finished: Callable[[EpisodeOutcome], None],
         sim_backend: str = "auto",
         seed: int = 0,
+        video_recorder: Optional[EpisodeVideoRecorder] = None,
     ) -> None:
         self.scenario = scenario
         self.group = group
         self.executor_ref = executor_ref
         self.on_episode_finished = on_episode_finished
+        self.video_recorder = video_recorder or EpisodeVideoRecorder(
+            VideoConfig(enabled=False)
+        )
         self.episode_data_per_env: Dict[int, EpisodeData] = {}
         self.skill_managers: Dict[int, SkillManager] = {}
         self.skill_state_refs: Dict[int, SkillStateRef] = {}
@@ -73,6 +78,8 @@ class GroupRunner:
             sim_backend=sim_backend,
             seed=seed,
         )
+        if self.video_recorder.config.enabled:
+            self.video_recorder.bind_environment(executor_ref.env)
         for _ in range(executor_ref.nb_env):
             if not self._register_next_episode():
                 break
@@ -192,6 +199,18 @@ class GroupRunner:
         self.episode_data_per_env[env_idx] = episode_data
         self.skill_managers[env_idx] = manager
         self.skill_state_refs[env_idx] = state_ref
+        stage_index = self.executor_ref.get_skill_execution_context(
+            env_idx,
+            episode_data.situation.attributes,
+        ).stage_id
+        instruction = episode_data.situation.current_instruction
+        self.video_recorder.start_episode(
+            env_idx,
+            episode_data.episode_id,
+            stage_index,
+            instruction.get_role(),
+            instruction.get_content(),
+        )
         self._queue_agent_input(env_idx, "instruction")
         return True
 
@@ -215,6 +234,17 @@ class GroupRunner:
                 "content": instruction.get_content(),
             },
         )
+        video_content = (
+            instruction.to_string()
+            if isinstance(instruction, StatusReturn)
+            else instruction.get_content()
+        )
+        self.video_recorder.update_instruction(
+            env_idx,
+            stage_index,
+            instruction.get_role(),
+            video_content,
+        )
         self.pending_agent_inputs[env_idx] = episode_data.situation
 
     def _finish_episode(
@@ -235,6 +265,7 @@ class GroupRunner:
             ),
             trace=list(episode_data.trace),
         )
+        self.video_recorder.finish_episode(env_idx, terminal_status)
         self.on_episode_finished(outcome)
         self.pending_agent_inputs.pop(env_idx, None)
         manager = self.skill_managers.pop(env_idx)
@@ -316,6 +347,12 @@ class GroupRunner:
                     )
                 if result.executed_answer is not None:
                     episode_data.last_agent_answer = result.executed_answer
+                executed_answer = result.executed_answer or result.request
+                self.video_recorder.update_answer(
+                    env_idx,
+                    executed_answer,
+                    hold=bool(executed_answer.get_say()),
+                )
                 to_executor[env_idx] = result.request
                 continue
 
@@ -324,6 +361,11 @@ class GroupRunner:
                 self.skill_state_refs[env_idx] = event.state_ref
                 if event.executed_answer is not None:
                     episode_data.last_agent_answer = event.executed_answer
+                    self.video_recorder.update_answer(
+                        env_idx,
+                        event.executed_answer,
+                        hold=False,
+                    )
                 if self._handle_terminal_status(env_idx, event.status):
                     continue
                 self._return_status_to_agent(env_idx, event.status)

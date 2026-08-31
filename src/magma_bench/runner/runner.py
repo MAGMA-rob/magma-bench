@@ -10,10 +10,15 @@ from magma_core.workers import LMWorker
 
 from magma_bench.agents import BenchmarkAgent, get_agent_mode
 from magma_bench.data_structures import Scenario
-from magma_bench.executor import ToolsEvalExecutor
+from magma_bench.executor import (
+    PlannerRetryEvent,
+    PlannerRetryResolvedEvent,
+    ToolsEvalExecutor,
+)
 from magma_bench.loader import load_groups_from_config, load_scenarios
 from magma_bench.results.manager import ResultManager
 from magma_bench.results.models import EpisodeOutcome
+from magma_bench.video import EpisodeVideoRecorder, VideoConfig
 
 from .group_runner import GroupRunner
 import magma_scenarios.envs # to load gym envs
@@ -30,10 +35,6 @@ class BenchmarkRunner:
     ) -> None:
         benchmark_config = magma_config.benchmark
         self._skip_judge = skip_judge
-        if benchmark_config.get("videos", False):
-            raise NotImplementedError(
-                "Benchmark video recording is not supported by magma_bench."
-            )
         if benchmark_config.get("shader", "default") != "default":
             raise NotImplementedError(
                 "Non-default benchmark shaders are not supported by magma_bench."
@@ -45,6 +46,15 @@ class BenchmarkRunner:
             )
         configured_seed = benchmark_config.get("seed", 42)
         self._seed = 42 if configured_seed is None else int(configured_seed)
+        self.video_recorder = EpisodeVideoRecorder(
+            VideoConfig(
+                enabled=bool(benchmark_config.get("videos", False)),
+                fps=int(benchmark_config.get("video_fps", 20)),
+                hold_seconds=float(
+                    benchmark_config.get("video_hold_seconds", 1.0)
+                ),
+            )
+        )
 
         agent_class: Type[BenchmarkAgent] = get_agent_mode(
             agent_mode_name
@@ -123,16 +133,31 @@ class BenchmarkRunner:
 
     def _run_group(self, group: GroupRunner) -> None:
         while not group.is_done():
-            if self.tool_executor.has_active_tools():
+            active_env_ids = self.tool_executor.get_active_tool_env_ids()
+            if active_env_ids:
                 action = self.tool_executor.step()
                 obs, _, _, _, _ = self.tool_executor.env.step(action)
+                self.video_recorder.capture_physical_step(active_env_ids)
             else:
                 obs = self.tool_executor.env.unwrapped.get_obs()
                 time.sleep(0.01)
 
             tools_ended = self.tool_executor.verif_ended_tool(obs)
+            for event in self.tool_executor.drain_planner_runtime_events():
+                if isinstance(event, PlannerRetryEvent):
+                    self.video_recorder.set_planner_retry(
+                        event.env_idx,
+                        event.attempt,
+                        event.max_attempts,
+                        event.message,
+                    )
+                elif isinstance(event, PlannerRetryResolvedEvent):
+                    self.video_recorder.clear_planner_retry(event.env_idx)
+            self.video_recorder.flush_holds()
+
             fetched_answers = self.agent.get_pending_results()
             benchmark_tick = group.tick(tools_ended, fetched_answers)
+            self.video_recorder.flush_holds()
 
             if benchmark_tick.has_inputs_for_agents():
                 self.agent.add_inputs(benchmark_tick.to_agents)
@@ -157,6 +182,10 @@ class BenchmarkRunner:
             ):
                 if not self.result_manager.start_scenario(scenario):
                     continue
+                if self.video_recorder.config.enabled:
+                    self.video_recorder.start_scenario(
+                        self.result_manager.video_directory(scenario.scenario_id)
+                    )
                 pending_episode_ids = self.result_manager.pending_episode_ids(
                     scenario.scenario_id
                 )
@@ -171,13 +200,18 @@ class BenchmarkRunner:
                         self._record_episode_outcome,
                         sim_backend=self._sim_backend,
                         seed=self._seed,
+                        video_recorder=self.video_recorder,
                     )
                     self._run_group(group_runner)
+                self.video_recorder.finish_scenario()
                 self.result_manager.finish_scenario(scenario)
             self.result_manager.finish_benchmark()
         finally:
             try:
                 self.agent.stop()
             finally:
-                if hasattr(self.tool_executor, "env"):
-                    self.tool_executor.env.close()
+                try:
+                    self.video_recorder.close()
+                finally:
+                    if hasattr(self.tool_executor, "env"):
+                        self.tool_executor.env.close()

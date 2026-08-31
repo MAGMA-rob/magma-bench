@@ -1,6 +1,6 @@
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 from magma_core.base.data_structures import EnvToolContext, SavedEnvData, ValidExecutionReq
 from magma_core.base.randomizer import RuntimeRandomizer
@@ -8,6 +8,23 @@ from magma_core.base.skills.skill_manager import SkillAPIProvider
 from magma_core.base.tasks import BaseTask
 
 from magma_bench.data_structures import Episode
+
+
+@dataclass(frozen=True)
+class PlannerRetryEvent:
+    env_idx: int
+    attempt: int
+    max_attempts: int
+    message: str
+
+
+@dataclass(frozen=True)
+class PlannerRetryResolvedEvent:
+    env_idx: int
+
+
+PlannerRuntimeEvent = Union[PlannerRetryEvent, PlannerRetryResolvedEvent]
+
 
 @dataclass
 class EvalEpisodeContext:
