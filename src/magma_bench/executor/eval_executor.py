@@ -7,6 +7,7 @@ from collections import OrderedDict
 from concurrent.futures import Future
 import copy
 import json
+import logging
 import threading
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -33,6 +34,7 @@ from magma_core.utils.global_utils import (
     batch_set_value,
     extract_env_state_val,
     merge_robot_articulations,
+    restore_disallowed_actor_states,
 )
 from magma_core.workers import LMWorker
 
@@ -54,6 +56,9 @@ from .context import (
     PlannerRuntimeEvent,
 )
 from .episode_runtime import build_episode_task
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class ToolsEvalExecutor(ToolsBaseExecutor):
@@ -445,6 +450,30 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                 env_idx,
                 tool_context.get_state_updates(),
             )
+            allowed_actors = tool_context.get_allowed_moving_actors()
+            if allowed_actors is not None:
+                restored_actors = restore_disallowed_actor_states(
+                    env_state,
+                    context.saved_data.env_state,
+                    env_idx,
+                    allowed_actors,
+                )
+                if restored_actors is None:
+                    LOGGER.warning(
+                        "Actor movement protection disabled due to an incompatible "
+                        "state layout episode=%s env=%d allowed=%s",
+                        context.episode.episode_id,
+                        env_idx,
+                        sorted(allowed_actors),
+                    )
+                elif restored_actors:
+                    state_changed = True
+                    LOGGER.info(
+                        "Restored disallowed actors episode=%s env=%d actors=%s",
+                        context.episode.episode_id,
+                        env_idx,
+                        restored_actors,
+                    )
             completed.append((env_idx, context, tool_context, tool_status))
 
         if state_changed:

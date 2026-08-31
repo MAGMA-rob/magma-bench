@@ -18,8 +18,10 @@ from magma_core.base.data_structures import (
     StageSuccess,
     ToolErrorFlag,
     ToolStatus,
+    UserInstruction,
     ValidExecutionReq,
 )
+from magma_core.base.stage import AskingBaseStage
 from magma_core.base.skills import (
     DeferredInputTransition,
     SkillDeferredInputResult,
@@ -35,6 +37,14 @@ from magma_bench.data_structures import (
     EpisodeData,
     EpisodeSituation,
     RunningState,
+)
+from magma_bench.artifacts import (
+    DeclarativeStageSpec,
+    InstructionSpec,
+    StageInputSpec,
+    StagePresentationSpec,
+    deserialize_stage,
+    serialize_stage,
 )
 from magma_bench.runner import group_runner as group_runner_module
 from magma_bench.runner.group_runner import GroupRunner
@@ -396,6 +406,41 @@ def test_skip_judge_queues_a_success_without_worker():
 
     assert context.judge_pending is True
     assert executor._judge_done[0].stage_success == StageSuccess.FINISH
+
+
+def test_stage_artifacts_preserve_allowed_tools():
+    declarative_spec = DeclarativeStageSpec(
+        id="answer",
+        type="answer",
+        presentation=StagePresentationSpec(
+            stage_input=StageInputSpec(
+                instruction=InstructionSpec.model_validate(
+                    UserInstruction("Inspect before answering.").to_spec()
+                ),
+            ),
+            verification_prompt="Verify the answer.",
+            stage_goal_description="Answer after inspection.",
+        ),
+        target_tool_calls=1,
+        max_tool_calls=3,
+        allow_tools_before_answer=True,
+        allowed_tools=["detect"],
+    )
+    declarative_stage = deserialize_stage(declarative_spec)
+
+    serialized_spec = serialize_stage(
+        AskingBaseStage(
+            question="What is visible?",
+            answer="a cube",
+            allow_tools_before_answer=True,
+            allowed_tools=["detect"],
+        ),
+        "serialized_answer",
+    )
+    serialized_stage = deserialize_stage(serialized_spec)
+
+    assert declarative_stage.get_allowed_tools() == ["detect"]
+    assert serialized_stage.get_allowed_tools() == ["detect"]
 
 
 def test_planner_terminal_retry_keeps_a_runtime_event():
