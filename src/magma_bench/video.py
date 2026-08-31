@@ -319,7 +319,8 @@ class EpisodeVideoRecorder:
     def _render_batch(self) -> Any:
         if self._environment is None:
             raise RuntimeError("No environment is bound to the video recorder")
-        rendered = self._environment.render_rgb_array()
+        environment = getattr(self._environment, "unwrapped", self._environment)
+        rendered = environment.render_rgb_array()
         if hasattr(rendered, "detach"):
             rendered = rendered.detach()
         if hasattr(rendered, "cpu"):
