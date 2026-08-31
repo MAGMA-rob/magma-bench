@@ -297,7 +297,10 @@ def test_result_manager_replays_partial_and_rejects_incompatible_agent(tmp_path)
     resumed = ResultManager(results_path, benchmark_root, agent, [scenario])
     assert resumed.start_scenario(scenario) is True
     partial_episodes = results_path / "scenarios" / ".partial" / "scenario_a" / "episodes"
-    assert list(partial_episodes.iterdir()) == []
+    completed_episode_id = scenario.episodes[0].episode_id
+    assert (partial_episodes / f"{completed_episode_id}.json").is_file()
+    assert completed_episode_id not in resumed.pending_episode_ids("scenario_a")
+    assert len(resumed.pending_episode_ids("scenario_a")) == 23
 
     incompatible = dict(agent)
     incompatible["agent"] = "another-agent"
@@ -322,3 +325,60 @@ def test_result_manager_keeps_infrastructure_failure_partial(tmp_path):
     assert (
         tmp_path / "results" / "scenarios" / ".partial" / "scenario_a"
     ).is_dir()
+
+    resumed = ResultManager(
+        tmp_path / "results",
+        benchmark_root,
+        agent,
+        [scenario],
+    )
+    assert resumed.start_scenario(scenario) is True
+    failed_episode_id = scenario.episodes[0].episode_id
+    assert resumed.pending_episode_ids("scenario_a") == {failed_episode_id}
+    resumed.record_episode(_outcome(failed_episode_id))
+    resumed.finish_scenario(scenario)
+
+
+def test_result_manager_rejects_corrupt_partial_episode(tmp_path):
+    benchmark_root, scenario, agent = _manager_fixture(tmp_path)
+    results_path = tmp_path / "results"
+    manager = ResultManager(results_path, benchmark_root, agent, [scenario])
+    manager.start_scenario(scenario)
+    episode_path = (
+        results_path
+        / "scenarios"
+        / ".partial"
+        / "scenario_a"
+        / "episodes"
+        / f"{scenario.episodes[0].episode_id}.json"
+    )
+    episode_path.write_text("not-json", encoding="utf-8")
+
+    resumed = ResultManager(results_path, benchmark_root, agent, [scenario])
+    with pytest.raises(ValueError):
+        resumed.start_scenario(scenario)
+
+
+def test_result_manager_rejects_runtime_identity_changes(tmp_path):
+    benchmark_root, scenario, agent = _manager_fixture(tmp_path)
+    results_path = tmp_path / "results"
+    ResultManager(
+        results_path,
+        benchmark_root,
+        agent,
+        [scenario],
+        judge_mode="skipped",
+        sim_backend="cpu",
+        seed=17,
+    )
+
+    with pytest.raises(ValueError, match="incompatible"):
+        ResultManager(
+            results_path,
+            benchmark_root,
+            agent,
+            [scenario],
+            judge_mode="backend",
+            sim_backend="cpu",
+            seed=17,
+        )

@@ -106,14 +106,12 @@ class SkeletonManifest(StrictModel):
             raise ValueError("Skeleton conditions must be unique")
         if "clean" not in self.conditions:
             raise ValueError("Skeleton conditions must include clean")
-        combined_expected = {
+        if "combined" in self.conditions and not {
             "mission_update",
             "execution_error",
-        }.issubset(self.conditions)
-        if ("combined" in self.conditions) != combined_expected:
+        }.issubset(self.conditions):
             raise ValueError(
-                "combined must be present if and only if mission_update and "
-                "execution_error are present"
+                "combined requires mission_update and execution_error"
             )
         return self
 

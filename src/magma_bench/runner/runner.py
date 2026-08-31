@@ -26,14 +26,25 @@ class BenchmarkRunner:
         agent_mode_name: str,
         magma_config: MAGMAConfig,
         class_specific_args: Dict,
-        skip_backends: bool = False,
+        skip_judge: bool = False,
     ) -> None:
         benchmark_config = magma_config.benchmark
-        self._skip_backends = skip_backends
-        if skip_backends and agent_mode_name != "task_state_reactive":
-            raise ValueError(
-                "skip_backends=True is only supported with task_state_reactive."
+        self._skip_judge = skip_judge
+        if benchmark_config.get("videos", False):
+            raise NotImplementedError(
+                "Benchmark video recording is not supported by magma_bench."
             )
+        if benchmark_config.get("shader", "default") != "default":
+            raise NotImplementedError(
+                "Non-default benchmark shaders are not supported by magma_bench."
+            )
+        self._sim_backend = str(benchmark_config.get("sim_backend", "auto"))
+        if self._sim_backend not in {"auto", "cpu", "gpu"}:
+            raise ValueError(
+                "benchmark.sim_backend must be one of: auto, cpu, gpu"
+            )
+        configured_seed = benchmark_config.get("seed", 42)
+        self._seed = 42 if configured_seed is None else int(configured_seed)
 
         agent_class: Type[BenchmarkAgent] = get_agent_mode(
             agent_mode_name
@@ -44,24 +55,26 @@ class BenchmarkRunner:
             bool(benchmark_config.get("deterministic_decoding", True)),
         )
 
-        verifier_backend = None
-        if not skip_backends:
+        if skip_judge:
+            worker = None
+        else:
             verifier_backend = magma_config.backends[
                 benchmark_config["backend_verifier"]
             ]
             class_specific_args.setdefault("backend_url", verifier_backend.endpoint)
             class_specific_args.setdefault("backend_header", verifier_backend.headers)
+            worker = LMWorker(verifier_backend)
 
         self.agent = agent_class(**class_specific_args)
         self._scenarios: List[Scenario] = []
         self._benchmark_root: Optional[Path] = None
         self._benchmark_config = benchmark_config
         self.result_manager: Optional[ResultManager] = None
-        worker = None if skip_backends else LMWorker(verifier_backend)
         self.tool_executor = ToolsEvalExecutor(
             magma_config.magma_planner_address,
             worker,
             nb_env=int(benchmark_config.get("nb_env", 1)),
+            skip_judge=skip_judge,
         )
 
     def load_benchmark(
@@ -103,6 +116,9 @@ class BenchmarkRunner:
             benchmark_root=self._benchmark_root,
             agent_card=self.agent.get_agent_card(),
             scenarios=self._scenarios,
+            judge_mode="skipped" if self._skip_judge else "backend",
+            sim_backend=self._sim_backend,
+            seed=self._seed,
         )
 
     def _run_group(self, group: GroupRunner) -> None:
@@ -123,19 +139,13 @@ class BenchmarkRunner:
             if benchmark_tick.has_call_for_executor():
                 self.tool_executor.compute_actions(benchmark_tick.to_executor)
 
-    def run(self, args) -> None:
+    def run(self) -> None:
         """Run all loaded scenarios; outcomes are emitted through the callback."""
 
         if not self._scenarios:
             raise ValueError(
                 "There is no benchmark loaded. Please use load_benchmark() before run()."
             )
-        selected_task_indices = getattr(args, "task_indices", None)
-        if selected_task_indices is not None:
-            raise NotImplementedError(
-                "Subset execution is not implemented for compiled benchmarks"
-            )
-
         self.result_manager = self._build_result_manager()
 
         try:
@@ -147,15 +157,27 @@ class BenchmarkRunner:
             ):
                 if not self.result_manager.start_scenario(scenario):
                     continue
-                for episode_group in load_groups_from_config(scenario):
+                pending_episode_ids = self.result_manager.pending_episode_ids(
+                    scenario.scenario_id
+                )
+                for episode_group in load_groups_from_config(
+                    scenario,
+                    pending_episode_ids,
+                ):
                     group_runner = GroupRunner(
                         scenario,
                         episode_group,
                         self.tool_executor,
                         self._record_episode_outcome,
+                        sim_backend=self._sim_backend,
+                        seed=self._seed,
                     )
                     self._run_group(group_runner)
                 self.result_manager.finish_scenario(scenario)
             self.result_manager.finish_benchmark()
         finally:
-            self.agent.stop()
+            try:
+                self.agent.stop()
+            finally:
+                if hasattr(self.tool_executor, "env"):
+                    self.tool_executor.env.close()

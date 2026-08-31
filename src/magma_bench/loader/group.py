@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 import json
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from magma_bench.data_structures import Episode, Scenario
 from magma_core.base.tasks import InitializationParameters
@@ -23,7 +23,10 @@ class EpisodeGroup:
         return out
 
 
-def load_groups_from_config(scenario: Scenario) -> List[EpisodeGroup]:
+def load_groups_from_config(
+    scenario: Scenario,
+    episode_ids: Optional[Set[str]] = None,
+) -> List[EpisodeGroup]:
     """Group episodes by the options shared by the environment and planner."""
 
     grouped_episodes: Dict[str, List[Episode]] = {}
@@ -31,6 +34,8 @@ def load_groups_from_config(scenario: Scenario) -> List[EpisodeGroup]:
     group_order: List[str] = []
 
     for episode in scenario.episodes:
+        if episode_ids is not None and episode.episode_id not in episode_ids:
+            continue
         parameters_spec = episode.initialization.get("parameters")
         if not isinstance(parameters_spec, dict):
             raise ValueError(

@@ -53,6 +53,8 @@ from .episode_runtime import build_episode_task
 class ToolsEvalExecutor(ToolsBaseExecutor):
     """Execute independent benchmark episodes in shared simulator slots."""
 
+    MAX_JUDGE_ATTEMPTS = 6
+
     _envs : Dict[int, EvalEpisodeContext]
 
 
@@ -61,6 +63,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             planner_endpoint: str,
             worker: Optional[LMWorker],
             nb_env: int = 1,
+            skip_judge: bool = False,
         ) -> None:
         super().__init__(
             nb_env,
@@ -74,6 +77,8 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
         self._group_base_state: Optional[Dict] = None
         self._judge_done: Dict[int, ToolStatus] = {}
         self._immediate_done: Dict[int, ToolStatus] = {}
+        self._fatal_error: Optional[RuntimeError] = None
+        self.skip_judge = skip_judge
         self.lock = threading.Lock()
 
     def initialize_group(
@@ -82,6 +87,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             group: EpisodeGroup,
             obs_mode: str = "state_dict",
             sim_backend: str = "auto",
+            seed: int = 0,
         ) -> DefaultEnv:
         """Initialize the simulator configuration shared by an episode group."""
 
@@ -96,6 +102,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
         with self.lock:
             self._judge_done.clear()
             self._immediate_done.clear()
+            self._fatal_error = None
 
         self.env = self._create_envs(
             scenario.environment_id,
@@ -104,6 +111,11 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             obs_mode,
             sim_backend,
         )
+        reset_options = copy.deepcopy(group.env_options)
+        reset_options["reconfigure"] = False
+        self.env.reset(seed=seed, options=reset_options)
+        action = self.step()
+        self.env.step(action)
         self._group_base_state = copy.deepcopy(self.env.unwrapped.get_state_dict())
         return self.env
 
@@ -242,7 +254,16 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                         "The agent returned a message while this stage requires an action.",
                     )
                     continue
-                self._submit_judge(env_idx)
+                if self.skip_judge:
+                    context.judge_pending = True
+                    self._store_judge_verdict(
+                        env_idx,
+                        verdict=True,
+                        failure_reason="",
+                        judge_response=None,
+                    )
+                else:
+                    self._submit_judge(env_idx)
                 continue
 
             calls = answer.get_tool_calls()
@@ -347,11 +368,19 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             attributes=copy.deepcopy(public_attributes),
             tool_calls=context.saved_data.tool_calls,
             forgiven_tool_calls=context.saved_data.forgiven_tool_calls,
+            flag_answer_to_user=context.task_ref.get_stage_input(
+                context.saved_data.stage_id
+            ).flag_answer_to_user,
         )
     
 
     def verif_ended_tool(self, obs: Dict) -> Dict[int, ToolStatus]:
         """Verify completed tools and advance each episode independently."""
+
+        with self.lock:
+            fatal_error = self._fatal_error
+        if fatal_error is not None:
+            raise fatal_error
 
         out = self._consume_judge_results()
         with self.lock:
@@ -543,7 +572,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                 saved_data.forgiven_tool_calls = tool_context.forgiven_tool_calls
                 saved_data.active_stage_error_state = tool_context.error_state
                 saved_data.composite_progress = tool_context.composite_progress
-            context.retry_count = 0
+            context.planner_retry_count = 0
             context.tool_context = None
 
             translated = context.randomizer.traduce_end(
@@ -574,7 +603,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
 
         for env_idx in env_ids:
             context = self._envs[env_idx]
-            if context.retry_count >= 10:
+            if context.planner_retry_count >= 10:
                 canonical = ToolStatus(
                     robots_status=[
                         RobotToolStatus(
@@ -596,11 +625,11 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                     {env_idx: canonical}
                 )[env_idx]
                 continue
-            context.retry_count += 1
+            context.planner_retry_count += 1
             restored_state = copy.deepcopy(context.saved_data.env_state)
             current_state = extract_env_state_val(env_state, env_idx)
 
-            if context.retry_count % 2:
+            if context.planner_retry_count % 2:
                 source_articulations = current_state.get("articulations")
             else:
                 source_articulations = context.task_ref._default_env_state.get(
@@ -664,6 +693,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             )
 
         context.judge_pending = True
+        context.judge_attempt_count += 1
         payload = JudgePayload(
             rule=rule,
             model_answer=context.get_answer().get_say(),
@@ -673,36 +703,78 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             ).instruction.get_content(),
         )
         try:
-            self.worker.submit(payload, callback=self._on_judge_correction)
+            self.worker.submit(
+                payload,
+                callback=lambda future, idx=env_idx: self._on_judge_correction(
+                    idx,
+                    future,
+                ),
+            )
         except Exception:
-            context.judge_pending = False
-            raise
+            self._handle_judge_failure(env_idx)
 
-    def _on_judge_correction(self, future: Future) -> None:
+    def _on_judge_correction(self, env_idx: int, future: Future) -> None:
         """Store a judge result for the episode occupying its environment."""
 
-        env_idx, judge_response = future.result()
         context = self._envs.get(env_idx)
         if context is None:
             return
 
         try:
+            response_env_idx, judge_response = future.result()
+            if response_env_idx != env_idx:
+                raise ValueError(
+                    f"Judge response environment {response_env_idx} does not match "
+                    f"submitted environment {env_idx}"
+                )
             judge_dict = json.loads(judge_response)
             verdict = judge_dict["verdict"]
             if not isinstance(verdict, bool):
                 raise TypeError("Judge verdict must be a boolean")
-        except (json.JSONDecodeError, KeyError, TypeError):
-            if context.retry_count >= 5:
-                verdict = False
-                failure_reason = "Judge failed to return a valid verdict after 6 attempts"
-            else:
-                context.retry_count += 1
-                self._submit_judge(env_idx, retry=True)
-                return
-        else:
-            failure_reason = str(
-                judge_dict.get("reason", judge_dict.get("explanation", ""))
-            ).strip()
+        except Exception:
+            self._handle_judge_failure(env_idx)
+            return
+
+        failure_reason = str(
+            judge_dict.get("reason", judge_dict.get("explanation", ""))
+        ).strip()
+        self._store_judge_verdict(
+            env_idx,
+            verdict=verdict,
+            failure_reason=failure_reason,
+            judge_response=judge_response,
+        )
+
+    def _handle_judge_failure(self, env_idx: int) -> None:
+        """Retry a failed judge request, then expose a fatal runner error."""
+
+        context = self._envs.get(env_idx)
+        if context is None:
+            return
+        if context.judge_attempt_count < self.MAX_JUDGE_ATTEMPTS:
+            self._submit_judge(env_idx, retry=True)
+            return
+
+        context.judge_pending = False
+        error = RuntimeError(
+            "Impossible to obtain a valid judge answer for episode "
+            f"{context.episode.episode_id} after {self.MAX_JUDGE_ATTEMPTS} attempts."
+        )
+        with self.lock:
+            self._fatal_error = error
+
+    def _store_judge_verdict(
+        self,
+        env_idx: int,
+        verdict: bool,
+        failure_reason: str,
+        judge_response: Optional[str],
+    ) -> None:
+        """Queue a valid judge verdict for main-thread stage processing."""
+
+        context = self._envs.get(env_idx)
+        if context is None:
+            return
 
         stage_id = context.saved_data.stage_id
         status = ToolStatus(
@@ -784,7 +856,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                 status.stage_success,
                 context.saved_data.logs,
             )
-            context.retry_count = 0
+            context.judge_attempt_count = 0
             context.judge_pending = False
             out[env_idx] = context.randomizer.traduce_end(
                 {env_idx: status}

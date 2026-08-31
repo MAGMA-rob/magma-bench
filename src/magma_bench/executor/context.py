@@ -19,7 +19,8 @@ class EvalEpisodeContext:
     saved_data: SavedEnvData
     tool_context: Optional[EnvToolContext] = None
     last_agent_answer: Optional[ValidExecutionReq] = None
-    retry_count: int = 0
+    planner_retry_count: int = 0
+    judge_attempt_count: int = 0
     judge_pending: bool = False
 
     def get_answer(self) -> ValidExecutionReq:

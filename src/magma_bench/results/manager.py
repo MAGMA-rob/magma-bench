@@ -4,9 +4,8 @@ from datetime import datetime, timezone
 import hashlib
 import os
 from pathlib import Path
-import shutil
 import tempfile
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Literal, Optional, Sequence, Set
 
 from magma_bench.artifacts import BenchmarkManifest, load_json_model
 from magma_bench.data_structures import Episode, Scenario
@@ -17,6 +16,7 @@ from .models import (
     BenchmarkResult,
     EpisodeOutcome,
     EpisodeResult,
+    ExecutionIdentity,
     MetricsPayload,
     RunManifest,
     ScenarioResult,
@@ -101,6 +101,9 @@ class ResultManager:
         benchmark_root: Path,
         agent_card: Dict,
         scenarios: Sequence[Scenario],
+        judge_mode: Literal["backend", "skipped"] = "backend",
+        sim_backend: str = "auto",
+        seed: int = 0,
     ) -> None:
         self.results_path = results_path.resolve()
         self.benchmark_root = benchmark_root.resolve()
@@ -147,8 +150,14 @@ class ResultManager:
             agent=identity,
             created_at=datetime.now(timezone.utc).isoformat(),
             scenario_ids=[scenario.scenario_id for scenario in self.scenarios],
+            execution=ExecutionIdentity(
+                judge_mode=judge_mode,
+                sim_backend=sim_backend,
+                seed=seed,
+            ),
         )
         self.active_scenario_id: Optional[str] = None
+        self._pending_episode_ids: Set[str] = set()
         self._initialize_run()
 
     @property
@@ -201,11 +210,43 @@ class ResultManager:
             return False
 
         partial_path = self._partial_scenario_path(scenario.scenario_id)
-        if partial_path.exists():
-            shutil.rmtree(partial_path)
-        (partial_path / "episodes").mkdir(parents=True)
+        episodes_path = partial_path / "episodes"
+        episodes_path.mkdir(parents=True, exist_ok=True)
+        expected_ids = {episode.episode_id for episode in scenario.episodes}
+        actual_files = set(episodes_path.iterdir())
+        expected_files = {
+            episodes_path / f"{episode_id}.json" for episode_id in expected_ids
+        }
+        unexpected = actual_files - expected_files
+        if unexpected:
+            raise ValueError(
+                f"Unknown episode result files for {scenario.scenario_id!r}: "
+                f"{sorted(path.name for path in unexpected)}"
+            )
+
+        pending_ids = expected_ids.copy()
+        for path in sorted(actual_files, key=lambda item: item.name):
+            result = EpisodeResult.model_validate_json(
+                path.read_text(encoding="utf-8")
+            )
+            expected_episode_id = path.stem
+            if result.episode_id != expected_episode_id:
+                raise ValueError(
+                    f"Episode result identity mismatch in {path.name!r}"
+                )
+            if result.terminal.status != "infrastructure_failure":
+                pending_ids.remove(expected_episode_id)
+
         self.active_scenario_id = scenario.scenario_id
+        self._pending_episode_ids = pending_ids
         return True
+
+    def pending_episode_ids(self, scenario_id: str) -> Set[str]:
+        """Return the episodes that still need execution for the active scenario."""
+
+        if self.active_scenario_id != scenario_id:
+            raise RuntimeError(f"Scenario {scenario_id!r} is not active")
+        return set(self._pending_episode_ids)
 
     def record_episode(self, outcome: EpisodeOutcome) -> None:
         if self.active_scenario_id is None:
@@ -219,6 +260,10 @@ class ResultManager:
                 f"Episode {outcome.episode_id!r} belongs to {scenario_id!r}, "
                 f"not active scenario {self.active_scenario_id!r}"
             )
+        if outcome.episode_id not in self._pending_episode_ids:
+            raise ValueError(
+                f"Episode {outcome.episode_id!r} is already complete"
+            )
 
         result = EpisodeResult.model_validate(outcome.model_dump(mode="python"))
         path = (
@@ -227,15 +272,29 @@ class ResultManager:
             / f"{outcome.episode_id}.json"
         )
         if path.exists():
-            raise ValueError(
-                f"Episode {outcome.episode_id!r} was completed more than once"
+            previous = EpisodeResult.model_validate_json(
+                path.read_text(encoding="utf-8")
             )
+            if previous.episode_id != outcome.episode_id:
+                raise ValueError(
+                    f"Episode result identity mismatch in {path.name!r}"
+                )
+            if previous.terminal.status != "infrastructure_failure":
+                raise ValueError(
+                    f"Episode {outcome.episode_id!r} was completed more than once"
+                )
         _write_model_atomic(path, result)
+        self._pending_episode_ids.remove(outcome.episode_id)
 
     def finish_scenario(self, scenario: Scenario) -> ScenarioResult:
         if self.active_scenario_id != scenario.scenario_id:
             raise RuntimeError(
                 f"Scenario {scenario.scenario_id!r} is not the active scenario"
+            )
+        if self._pending_episode_ids:
+            raise RuntimeError(
+                "Scenario still has pending episodes: "
+                f"{sorted(self._pending_episode_ids)}"
             )
         partial_path = self._partial_scenario_path(scenario.scenario_id)
         results = self._load_episode_results(partial_path, scenario)
@@ -266,6 +325,7 @@ class ResultManager:
             )
         os.replace(partial_path, completed_path)
         self.active_scenario_id = None
+        self._pending_episode_ids.clear()
         return scenario_result
 
     def finish_benchmark(self) -> BenchmarkResult:

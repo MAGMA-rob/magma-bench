@@ -136,6 +136,14 @@ class AgentIdentity(ResultModel):
     prediction_mode: str
 
 
+class ExecutionIdentity(ResultModel):
+    """Runtime choices that must remain stable when a run is resumed."""
+
+    judge_mode: Literal["backend", "skipped"] = "backend"
+    sim_backend: str = "auto"
+    seed: int = 0
+
+
 class RunManifest(ResultModel):
     schema_version: Literal["1.1"] = RESULT_SCHEMA_VERSION
     benchmark_version: str
@@ -143,6 +151,7 @@ class RunManifest(ResultModel):
     agent: AgentIdentity
     created_at: str
     scenario_ids: List[str]
+    execution: ExecutionIdentity = Field(default_factory=ExecutionIdentity)
 
     @model_validator(mode="after")
     def validate_scenarios(self) -> "RunManifest":

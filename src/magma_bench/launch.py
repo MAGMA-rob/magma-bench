@@ -16,7 +16,11 @@ def parse_args():
         help="Directory produced by magma-bench-build.",
     )
     
-    parser.add_argument("--scenarios", nargs="+", help="One or more scenario names.")
+    parser.add_argument(
+        "--scenarios",
+        nargs="+",
+        help="One or more scenario IDs or names; all their episodes are run.",
+    )
     parser.add_argument(
         "--config_path", "-c",
         type=str,
@@ -24,7 +28,6 @@ def parse_args():
         help="Custom config to pass to MAGMA-GEN."
     )
 
-    parser.add_argument("--videos", action="store_true", help="If specified, enable the video Wrapper to see videos of the benchmark")
     parser.add_argument(
         "--verifier_backend", '-vb',
         type=str,
@@ -35,8 +38,12 @@ def parse_args():
         type=str,
         help="The address of the magma_agent server to use for this generation."
     )
-    parser.add_argument("-b", "--sim_backend", type=str, help="Which simulation backend to use. Can be 'auto', 'cpu', 'gpu'")
-    parser.add_argument("--shader", type=str, help="Change shader used for rendering. Default is 'default' which is very fast. Can also be 'rt' for ray tracing and generating photo-realistic renders. Can also be 'rt-fast' for a faster but lower quality ray-traced renderer")
+    parser.add_argument(
+        "-b",
+        "--sim_backend",
+        choices=("auto", "cpu", "gpu"),
+        help="Simulation backend.",
+    )
     parser.add_argument("--save_dir", type=str, help="where to save videos, log, result of the benchmark")
     parser.add_argument(
         "--results_path",
@@ -50,6 +57,11 @@ def parse_args():
         help="Request greedy inference from magma_agent (default: enabled).",
     )
     parser.add_argument("--seed", type=int, help="The default start seed (default = 42)")
+    parser.add_argument(
+        "--skip_judge",
+        action="store_true",
+        help="Auto-validate text answers without starting a judge backend.",
+    )
     args, unknown = parser.parse_known_args()
 
     # Parse extra --key value pairs
@@ -71,7 +83,14 @@ def parse_args():
     return args
 
 def build_override_dict(args):
-    excluded = {"agent", "benchmark_root", "scenarios","extra"}
+    excluded = {
+        "agent",
+        "benchmark_root",
+        "config_path",
+        "scenarios",
+        "skip_judge",
+        "extra",
+    }
     overrides = {"benchmark":{}}
 
     for key, value in vars(args).items():
@@ -111,17 +130,21 @@ def main(args : argparse.Namespace):
 
     override_dict = build_override_dict(args)
     default_path = resolve_config_path(args.config_path)
-    magma_config = MAGMAConfig.load(default_path)
+    magma_config = MAGMAConfig.load(
+        default_path,
+        accept_no_backend=args.skip_judge,
+    )
     magma_config.override_with_dict(override_dict)
 
     runner = BenchmarkRunner(
         args.agent, 
         magma_config=magma_config,
-        class_specific_args=args.extra
+        class_specific_args=args.extra,
+        skip_judge=args.skip_judge,
     )
     runner.load_benchmark(args.benchmark_root, args.scenarios)
 
-    runner.run(args)
+    runner.run()
 
 
 if __name__ == "__main__":
