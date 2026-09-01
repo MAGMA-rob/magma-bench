@@ -85,6 +85,7 @@ class BenchmarkRunner:
             worker,
             nb_env=int(benchmark_config.get("nb_env", 1)),
             skip_judge=skip_judge,
+            visual_assets=self.video_recorder.config.enabled,
         )
 
     def load_benchmark(

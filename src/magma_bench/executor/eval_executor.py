@@ -75,11 +75,13 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             worker: Optional[LMWorker],
             nb_env: int = 1,
             skip_judge: bool = False,
+            visual_assets: bool = False,
         ) -> None:
         super().__init__(
             nb_env,
             planner_endpoint=planner_endpoint,
             ollama_worker=worker,
+            visual_assets=visual_assets,
         )
         self._envs = {}
         self._free_idx = list(range(nb_env))
@@ -124,9 +126,11 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             obs_mode,
             sim_backend,
         )
-        reset_options = copy.deepcopy(group.env_options)
-        reset_options["reconfigure"] = False
-        self.env.reset(seed=seed, options=reset_options)
+        self.reset_environment(
+            group.env_options,
+            seed=seed,
+            reconfigure=False,
+        )
         action = self.step()
         self.env.step(action)
         self._group_base_state = copy.deepcopy(self.env.unwrapped.get_state_dict())
