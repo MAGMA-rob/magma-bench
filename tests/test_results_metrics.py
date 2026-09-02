@@ -278,6 +278,9 @@ def test_result_manager_saves_scenario_and_resumes(tmp_path):
         "compositional",
     }
     assert benchmark_result.metrics.counts.episode_count == 24
+    assert benchmark_result.status == "complete"
+    assert benchmark_result.completed_scenario_count == 1
+    assert benchmark_result.partial_scenario_ids == []
     assert benchmark_result.metrics_by_track["in_domain"].counts.skeleton_count == 1
     assert (results_path / "result.json").is_file()
     assert (results_path / "scenarios" / "scenario_a" / "result.json").is_file()
@@ -323,11 +326,19 @@ def test_result_manager_keeps_infrastructure_failure_partial(tmp_path):
                 status="infrastructure_failure" if index == 0 else "success",
             )
         )
-    with pytest.raises(RuntimeError, match="infrastructure failures"):
-        manager.finish_scenario(scenario)
+    assert manager.finish_scenario(scenario) is None
     assert (
         tmp_path / "results" / "scenarios" / ".partial" / "scenario_a"
     ).is_dir()
+    benchmark_result = manager.finish_benchmark()
+    assert benchmark_result.status == "partial"
+    assert benchmark_result.completed_scenario_count == 0
+    assert benchmark_result.partial_scenario_ids == ["scenario_a"]
+    assert benchmark_result.metrics.counts.episode_count == 0
+    assert [
+        failure.episode_id
+        for failure in benchmark_result.infrastructure_failures
+    ] == [scenario.episodes[0].episode_id]
 
     resumed = ResultManager(
         tmp_path / "results",

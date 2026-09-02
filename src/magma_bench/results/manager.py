@@ -17,6 +17,7 @@ from .models import (
     EpisodeOutcome,
     EpisodeResult,
     ExecutionIdentity,
+    InfrastructureFailure,
     MetricsPayload,
     RunManifest,
     ScenarioResult,
@@ -295,7 +296,7 @@ class ResultManager:
         _write_model_atomic(path, result)
         self._pending_episode_ids.remove(outcome.episode_id)
 
-    def finish_scenario(self, scenario: Scenario) -> ScenarioResult:
+    def finish_scenario(self, scenario: Scenario) -> Optional[ScenarioResult]:
         if self.active_scenario_id != scenario.scenario_id:
             raise RuntimeError(
                 f"Scenario {scenario.scenario_id!r} is not the active scenario"
@@ -313,10 +314,9 @@ class ResultManager:
             if result.terminal.status == "infrastructure_failure"
         ]
         if infrastructure_failures:
-            raise RuntimeError(
-                "Scenario contains infrastructure failures and remains partial: "
-                f"{sorted(infrastructure_failures)}"
-            )
+            self.active_scenario_id = None
+            self._pending_episode_ids.clear()
+            return None
 
         bindings = [
             (scenario.scenario_id, episode) for episode in scenario.episodes
@@ -344,7 +344,36 @@ class ResultManager:
             )
         all_bindings: List[EpisodeBinding] = []
         all_results: Dict[str, EpisodeResult] = {}
+        partial_scenario_ids: List[str] = []
+        infrastructure_failures: List[InfrastructureFailure] = []
         for scenario in self.scenarios:
+            completed_path = self._completed_scenario_path(scenario.scenario_id)
+            if not completed_path.exists():
+                partial_scenario_ids.append(scenario.scenario_id)
+                episodes_path = (
+                    self._partial_scenario_path(scenario.scenario_id) / "episodes"
+                )
+                for episode in scenario.episodes:
+                    episode_path = episodes_path / f"{episode.episode_id}.json"
+                    if not episode_path.is_file():
+                        continue
+                    result = EpisodeResult.model_validate_json(
+                        episode_path.read_text(encoding="utf-8")
+                    )
+                    if result.episode_id != episode.episode_id:
+                        raise ValueError(
+                            "Episode result identity mismatch in "
+                            f"{episode.episode_id!r}"
+                        )
+                    if result.terminal.status == "infrastructure_failure":
+                        infrastructure_failures.append(
+                            InfrastructureFailure(
+                                scenario_id=scenario.scenario_id,
+                                episode_id=episode.episode_id,
+                                reason=result.terminal.reason,
+                            )
+                        )
+                continue
             results = self._load_completed_scenario(scenario)
             all_bindings.extend(
                 (scenario.scenario_id, episode) for episode in scenario.episodes
@@ -352,6 +381,13 @@ class ResultManager:
             all_results.update(results)
 
         benchmark_result = BenchmarkResult(
+            status="partial" if partial_scenario_ids else "complete",
+            expected_scenario_count=len(self.scenarios),
+            completed_scenario_count=(
+                len(self.scenarios) - len(partial_scenario_ids)
+            ),
+            partial_scenario_ids=partial_scenario_ids,
+            infrastructure_failures=infrastructure_failures,
             metrics=compute_metrics(all_bindings, all_results),
             metrics_by_track=_compute_metrics_by_track(
                 all_bindings,

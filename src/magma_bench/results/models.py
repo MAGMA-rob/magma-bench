@@ -124,8 +124,21 @@ class ScenarioResult(ResultModel):
     metrics_by_track: Dict[Track, MetricsPayload]
 
 
+class InfrastructureFailure(ResultModel):
+    scenario_id: str
+    episode_id: str
+    reason: Optional[str] = None
+
+
 class BenchmarkResult(ResultModel):
     schema_version: Literal["1.1"] = RESULT_SCHEMA_VERSION
+    status: Literal["complete", "partial"] = "complete"
+    expected_scenario_count: int = Field(default=0, ge=0)
+    completed_scenario_count: int = Field(default=0, ge=0)
+    partial_scenario_ids: List[str] = Field(default_factory=list)
+    infrastructure_failures: List[InfrastructureFailure] = Field(
+        default_factory=list
+    )
     metrics: MetricsPayload
     metrics_by_track: Dict[Track, MetricsPayload]
 

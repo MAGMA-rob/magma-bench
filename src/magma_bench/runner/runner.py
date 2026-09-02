@@ -263,8 +263,41 @@ class BenchmarkRunner:
                     )
                     self._run_group(group_runner)
                 self.video_recorder.finish_scenario()
-                self.result_manager.finish_scenario(scenario)
-            self.result_manager.finish_benchmark()
+                scenario_result = self.result_manager.finish_scenario(scenario)
+                if scenario_result is None:
+                    self._progress_logger.warning(
+                        "SCENARIO_PARTIAL scenario=%s reason=infrastructure_failure",
+                        scenario.scenario_id,
+                    )
+            benchmark_result = self.result_manager.finish_benchmark()
+            if benchmark_result.status == "partial":
+                summary = (
+                    "Benchmark completed with infrastructure failures: "
+                    f"{benchmark_result.completed_scenario_count}/"
+                    f"{benchmark_result.expected_scenario_count} scenarios completed; "
+                    "partial scenarios were excluded from metrics."
+                )
+                self._progress_logger.warning(summary)
+                tqdm.write(summary)
+                for scenario_id in benchmark_result.partial_scenario_ids:
+                    message = f"- {scenario_id}"
+                    self._progress_logger.warning(
+                        "PARTIAL_SCENARIO scenario=%s",
+                        scenario_id,
+                    )
+                    tqdm.write(message)
+                    for failure in benchmark_result.infrastructure_failures:
+                        if failure.scenario_id != scenario_id:
+                            continue
+                        reason = (failure.reason or "unknown").replace("\n", " ")
+                        detail = f"  - {failure.episode_id}: {reason}"
+                        self._progress_logger.warning(
+                            "INFRASTRUCTURE_FAILURE scenario=%s episode=%s reason=%s",
+                            scenario_id,
+                            failure.episode_id,
+                            reason,
+                        )
+                        tqdm.write(detail)
         finally:
             try:
                 self.agent.stop()
