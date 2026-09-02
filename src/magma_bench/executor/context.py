@@ -11,11 +11,20 @@ from magma_bench.data_structures import Episode
 
 
 @dataclass(frozen=True)
+class PlannerToolFailure:
+    tool_name: str
+    robot_name: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class PlannerRetryEvent:
     env_idx: int
+    episode_id: str
     attempt: int
     max_attempts: int
     message: str
+    tool_failures: Tuple[PlannerToolFailure, ...] = ()
 
 
 @dataclass(frozen=True)

@@ -454,6 +454,7 @@ def test_planner_terminal_retry_keeps_a_runtime_event():
         )
     )
     context = SimpleNamespace(
+        episode=SimpleNamespace(episode_id="episode_0"),
         planner_retry_count=10,
         saved_data=SimpleNamespace(
             stage_id=2,
@@ -465,13 +466,16 @@ def test_planner_terminal_retry_keeps_a_runtime_event():
     )
     executor._envs = {0: context}
 
-    failed = executor._handle_tool_retry({0: "planner blocked by collision"})
+    failed = executor._handle_tool_retry({
+        0: ("planner blocked by collision", ()),
+    })
     events = executor.drain_planner_runtime_events()
 
     assert failed[0].stage_success == StageSuccess.FAILED
     assert events == [
         PlannerRetryEvent(
             env_idx=0,
+            episode_id="episode_0",
             attempt=10,
             max_attempts=10,
             message="planner blocked by collision",

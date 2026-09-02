@@ -1,5 +1,6 @@
 import time
 from datetime import datetime
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Type, Union
 
@@ -80,6 +81,13 @@ class BenchmarkRunner:
         self._benchmark_root: Optional[Path] = None
         self._benchmark_config = benchmark_config
         self.result_manager: Optional[ResultManager] = None
+        self._episode_started_at: Dict[str, float] = {}
+        self._progress_logger = logging.getLogger(
+            f"magma_bench.progress.{id(self)}"
+        )
+        self._progress_logger.setLevel(logging.INFO)
+        self._progress_logger.propagate = False
+        self._progress_log_handler: Optional[logging.Handler] = None
         self.tool_executor = ToolsEvalExecutor(
             magma_config.magma_planner_address,
             worker,
@@ -108,6 +116,26 @@ class BenchmarkRunner:
         if self.result_manager is None:
             raise RuntimeError("ResultManager has not been initialized")
         self.result_manager.record_episode(outcome)
+        started_at = self._episode_started_at.pop(outcome.episode_id, None)
+        elapsed = None if started_at is None else time.monotonic() - started_at
+        self._progress_logger.info(
+            "EPISODE_COMPLETED episode=%s success=%s status=%s duration_seconds=%s reason=%s",
+            outcome.episode_id,
+            outcome.success,
+            outcome.terminal.status,
+            "unknown" if elapsed is None else f"{elapsed:.3f}",
+            outcome.terminal.reason or "",
+        )
+
+    def _record_episode_started(
+        self,
+        episode_id: str,
+    ) -> None:
+        self._episode_started_at[episode_id] = time.monotonic()
+        self._progress_logger.info(
+            "EPISODE_STARTED episode=%s",
+            episode_id,
+        )
 
     def _build_result_manager(self) -> ResultManager:
         if self._benchmark_root is None:
@@ -146,6 +174,24 @@ class BenchmarkRunner:
             tools_ended = self.tool_executor.verif_ended_tool(obs)
             for event in self.tool_executor.drain_planner_runtime_events():
                 if isinstance(event, PlannerRetryEvent):
+                    if event.tool_failures:
+                        tool_failure_messages = []
+                        for failure in event.tool_failures:
+                            reason = failure.reason.replace("\n", " ")
+                            tool_failure_messages.append(
+                                f"{failure.tool_name}: {reason}"
+                            )
+                        tool_failures = " | ".join(tool_failure_messages)
+                    else:
+                        reason = event.message.replace("\n", " ")
+                        tool_failures = f"unknown: {reason}"
+                    self._progress_logger.warning(
+                        "PLANNER_ERROR episode=%s attempt=%d/%d tools=[%s]",
+                        event.episode_id,
+                        event.attempt,
+                        event.max_attempts,
+                        tool_failures,
+                    )
                     self.video_recorder.set_planner_retry(
                         event.env_idx,
                         event.attempt,
@@ -173,6 +219,17 @@ class BenchmarkRunner:
                 "There is no benchmark loaded. Please use load_benchmark() before run()."
             )
         self.result_manager = self._build_result_manager()
+        progress_log_path = self.result_manager.results_path / "progress.log"
+        self._progress_log_handler = logging.FileHandler(
+            progress_log_path,
+            mode="a",
+            encoding="utf-8",
+        )
+        self._progress_log_handler.setFormatter(logging.Formatter(
+            "%(asctime)s | %(levelname)s | %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S",
+        ))
+        self._progress_logger.addHandler(self._progress_log_handler)
 
         try:
             for scenario in tqdm(
@@ -202,6 +259,7 @@ class BenchmarkRunner:
                         sim_backend=self._sim_backend,
                         seed=self._seed,
                         video_recorder=self.video_recorder,
+                        on_episode_started=self._record_episode_started,
                     )
                     self._run_group(group_runner)
                 self.video_recorder.finish_scenario()
@@ -214,5 +272,13 @@ class BenchmarkRunner:
                 try:
                     self.video_recorder.close()
                 finally:
-                    if hasattr(self.tool_executor, "env"):
-                        self.tool_executor.env.close()
+                    try:
+                        if hasattr(self.tool_executor, "env"):
+                            self.tool_executor.env.close()
+                    finally:
+                        if self._progress_log_handler is not None:
+                            self._progress_logger.removeHandler(
+                                self._progress_log_handler
+                            )
+                            self._progress_log_handler.close()
+                            self._progress_log_handler = None

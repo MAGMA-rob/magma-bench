@@ -54,6 +54,7 @@ from .context import (
     PlannerRetryEvent,
     PlannerRetryResolvedEvent,
     PlannerRuntimeEvent,
+    PlannerToolFailure,
 )
 from .episode_runtime import build_episode_task
 
@@ -423,7 +424,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
         completed: List[
             Tuple[int, EvalEpisodeContext, EnvToolContext, ToolStatus]
         ] = []
-        retry_failures: Dict[int, str] = {}
+        retry_failures: Dict[int, Tuple[str, Tuple[PlannerToolFailure, ...]]] = {}
 
         env_state = copy.deepcopy(self.env.unwrapped.get_state_dict())
         state_changed = False
@@ -439,13 +440,26 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             tool_status = tool_context.build_tool_status()
             if tool_status.should_restore_source_env_state():
                 context.tool_context = None
-                retry_messages = [
-                    robot_status.mess
-                    for robot_status in tool_status.robots_status
+                tool_failures = tuple(
+                    PlannerToolFailure(
+                        tool_name=robot_tool.tool_execution.function_name,
+                        robot_name=robot_status.robot_name,
+                        reason=robot_status.mess,
+                    )
+                    for robot_tool, robot_status in zip(
+                        tool_context.tool_robots,
+                        tool_status.robots_status,
+                    )
                     if robot_status.error_flag == ToolErrorFlag.PLANNER_ERROR
-                    and robot_status.mess
-                ]
-                retry_failures[env_idx] = "\n".join(retry_messages)
+                )
+                retry_failures[env_idx] = (
+                    "\n".join(
+                        failure.reason
+                        for failure in tool_failures
+                        if failure.reason
+                    ),
+                    tool_failures,
+                )
                 continue
             
             # Apply possible state changement (move_to, object state changement)
@@ -661,7 +675,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
 
     def _handle_tool_retry(
         self,
-        retry_failures: Dict[int, str],
+        retry_failures: Dict[int, Tuple[str, Tuple[PlannerToolFailure, ...]]],
     ) -> Dict[int, ToolStatus]:
         """Restore committed states and replay answers after planner failures."""
 
@@ -670,15 +684,17 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
         failed: Dict[int, ToolStatus] = {}
         robot_names = self.trajectory_converter.agents_name
 
-        for env_idx, planner_message in retry_failures.items():
+        for env_idx, (planner_message, tool_failures) in retry_failures.items():
             context = self._envs[env_idx]
             if context.planner_retry_count >= 10:
                 self._planner_runtime_events.append(
                     PlannerRetryEvent(
                         env_idx=env_idx,
+                        episode_id=context.episode.episode_id,
                         attempt=10,
                         max_attempts=10,
                         message=planner_message,
+                        tool_failures=tool_failures,
                     )
                 )
                 canonical = ToolStatus(
@@ -707,9 +723,11 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             self._planner_runtime_events.append(
                 PlannerRetryEvent(
                     env_idx=env_idx,
+                    episode_id=context.episode.episode_id,
                     attempt=context.planner_retry_count,
                     max_attempts=10,
                     message=planner_message,
+                    tool_failures=tool_failures,
                 )
             )
             restored_state = copy.deepcopy(context.saved_data.env_state)

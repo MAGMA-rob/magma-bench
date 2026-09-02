@@ -58,11 +58,13 @@ class GroupRunner:
         sim_backend: str = "auto",
         seed: int = 0,
         video_recorder: Optional[EpisodeVideoRecorder] = None,
+        on_episode_started: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.scenario = scenario
         self.group = group
         self.executor_ref = executor_ref
         self.on_episode_finished = on_episode_finished
+        self.on_episode_started = on_episode_started
         self.video_recorder = video_recorder or EpisodeVideoRecorder(
             VideoConfig(enabled=False)
         )
@@ -199,6 +201,8 @@ class GroupRunner:
         self.episode_data_per_env[env_idx] = episode_data
         self.skill_managers[env_idx] = manager
         self.skill_state_refs[env_idx] = state_ref
+        if self.on_episode_started is not None:
+            self.on_episode_started(episode_data.episode_id)
         stage_index = self.executor_ref.get_skill_execution_context(
             env_idx,
             episode_data.situation.attributes,
