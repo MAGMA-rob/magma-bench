@@ -34,7 +34,7 @@ class _VideoSession:
     activity_label: str = "Current action"
     activity: str = "Waiting for an agent answer"
     planner_attempt: Optional[int] = None
-    planner_max_attempts: int = 10
+    planner_max_attempts: int = 3
     planner_message: str = ""
     pending_hold_frames: int = 0
     last_raw_frame: Any = None

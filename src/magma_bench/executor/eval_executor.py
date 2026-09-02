@@ -33,7 +33,6 @@ from magma_core.utils.global_utils import (
     apply_env_state_updates,
     batch_set_value,
     extract_env_state_val,
-    merge_robot_articulations,
     restore_disallowed_actor_states,
 )
 from magma_core.workers import LMWorker
@@ -66,6 +65,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
     """Execute independent benchmark episodes in shared simulator slots."""
 
     MAX_JUDGE_ATTEMPTS = 6
+    MAX_PLANNER_RETRIES = 3
 
     _envs : Dict[int, EvalEpisodeContext]
 
@@ -332,6 +332,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                 self.trajectory_converter.transform_poses_in_actions(
                     tool_context,
                     env_idx,
+                    planner_attempt=context.planner_retry_count,
                 )
 
     def step(self) -> Union[torch.Tensor, OrderedDict]:
@@ -682,17 +683,23 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
         env_state = copy.deepcopy(self.env.unwrapped.get_state_dict())
         answers: Dict[int, ValidExecutionReq] = {}
         failed: Dict[int, ToolStatus] = {}
-        robot_names = self.trajectory_converter.agents_name
 
         for env_idx, (planner_message, tool_failures) in retry_failures.items():
             context = self._envs[env_idx]
-            if context.planner_retry_count >= 10:
+            batch_set_value(
+                env_state,
+                torch.tensor([env_idx]),
+                copy.deepcopy(context.saved_data.env_state),
+                strict=False,
+            )
+
+            if context.planner_retry_count >= self.MAX_PLANNER_RETRIES:
                 self._planner_runtime_events.append(
                     PlannerRetryEvent(
                         env_idx=env_idx,
                         episode_id=context.episode.episode_id,
-                        attempt=10,
-                        max_attempts=10,
+                        attempt=self.MAX_PLANNER_RETRIES,
+                        max_attempts=self.MAX_PLANNER_RETRIES,
                         message=planner_message,
                         tool_failures=tool_failures,
                     )
@@ -701,7 +708,10 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                     robots_status=[
                         RobotToolStatus(
                             "",
-                            "Planner failed after 10 retries.",
+                            (
+                                "Planner failed after "
+                                f"{self.MAX_PLANNER_RETRIES} retries."
+                            ),
                             False,
                             ToolErrorFlag.PLANNER_ERROR,
                         )
@@ -709,7 +719,10 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                     stage_id=context.saved_data.stage_id,
                     attributes=copy.deepcopy(context.saved_data.attributes),
                     error_descriptions=[""],
-                    failure_reason="Planner error exceeded 10 retries.",
+                    failure_reason=(
+                        "Planner error exceeded "
+                        f"{self.MAX_PLANNER_RETRIES} retries."
+                    ),
                     stage_success=StageSuccess.FAILED,
                     tool_calls=context.saved_data.tool_calls,
                     forgiven_tool_calls=context.saved_data.forgiven_tool_calls,
@@ -725,32 +738,10 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                     env_idx=env_idx,
                     episode_id=context.episode.episode_id,
                     attempt=context.planner_retry_count,
-                    max_attempts=10,
+                    max_attempts=self.MAX_PLANNER_RETRIES,
                     message=planner_message,
                     tool_failures=tool_failures,
                 )
-            )
-            restored_state = copy.deepcopy(context.saved_data.env_state)
-            current_state = extract_env_state_val(env_state, env_idx)
-
-            if context.planner_retry_count % 2:
-                source_articulations = current_state.get("articulations")
-            else:
-                source_articulations = context.task_ref._default_env_state.get(
-                    "articulations"
-                )
-            if source_articulations is not None:
-                restored_state["articulations"], _ = merge_robot_articulations(
-                    restored_state.get("articulations", {}),
-                    source_articulations,
-                    robot_names,
-                )
-
-            batch_set_value(
-                env_state,
-                torch.tensor([env_idx]),
-                restored_state,
-                strict=False,
             )
             answers[env_idx] = context.get_answer()
 
