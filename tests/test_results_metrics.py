@@ -290,6 +290,84 @@ def test_result_manager_saves_scenario_and_resumes(tmp_path):
     resumed.finish_benchmark()
 
 
+def test_result_manager_saves_ordered_model_logs_with_scenario(tmp_path):
+    benchmark_root, full_scenario, agent = _manager_fixture(tmp_path)
+    episode = full_scenario.episodes[0]
+    scenario = SimpleNamespace(
+        scenario_id=full_scenario.scenario_id,
+        episodes=(episode,),
+    )
+    results_path = tmp_path / "results"
+    manager = ResultManager(
+        results_path,
+        benchmark_root,
+        agent,
+        [scenario],
+        model_logs=True,
+    )
+    assert manager.start_scenario(scenario) is True
+    manager.start_episode_model_logs(episode.episode_id)
+    manager.record_model_diagnostics(
+        episode.episode_id,
+        2,
+        [
+            {
+                "component": "tsm",
+                "input": {
+                    "instruction": "Move le cube",
+                    "permanent_rules": [],
+                    "rules": [],
+                    "goals": ["[g0] Move the cube"],
+                },
+                "raw_output": "ADD_GOAL(...)",
+                "error": None,
+            },
+            {
+                "component": "dispatcher",
+                "input": {
+                    "permanent_rules": [],
+                    "rules": [],
+                    "goals": ["[g0] Move the cube"],
+                    "attributes": {"known_robots": ["panda"]},
+                    "history": [
+                        '{\"name\": \"pick\"}',
+                        "The cube was picked",
+                    ],
+                },
+                "raw_output": {"tools": []},
+                "error": None,
+            },
+        ],
+    )
+    manager.record_episode(_outcome(episode.episode_id))
+    manager.finish_scenario(scenario)
+
+    model_log_path = (
+        results_path
+        / "scenarios"
+        / "scenario_a"
+        / "model_logs"
+        / episode.skeleton_id
+        / episode.semantic.semantic_id
+        / episode.condition
+    )
+    assert [path.name for path in sorted(model_log_path.iterdir())] == [
+        "0000_tsm.txt",
+        "0001_dispatcher.txt",
+    ]
+    tsm_log = (model_log_path / "0000_tsm.txt").read_text(encoding="utf-8")
+    assert "STAGE_INDEX: 2" in tsm_log
+    assert "Move le cube" in tsm_log
+    assert "ADD_GOAL(...)" in tsm_log
+    assert "PARSED OUTPUT" not in tsm_log
+    assert "\nSTATE\n" not in tsm_log
+    dispatcher_log = (
+        model_log_path / "0001_dispatcher.txt"
+    ).read_text(encoding="utf-8")
+    assert "TOOLS\n" not in dispatcher_log
+    assert '{"name": "pick"}\nThe cube was picked' in dispatcher_log
+
+
 def test_result_manager_replays_partial_and_rejects_incompatible_agent(tmp_path):
     benchmark_root, scenario, agent = _manager_fixture(tmp_path)
     results_path = tmp_path / "results"

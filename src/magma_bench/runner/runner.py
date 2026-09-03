@@ -47,6 +47,12 @@ class BenchmarkRunner:
             )
         configured_seed = benchmark_config.get("seed", 42)
         self._seed = 42 if configured_seed is None else int(configured_seed)
+        self._model_logs = bool(
+            benchmark_config.get(
+                "model_logs",
+                benchmark_config.get("logs", False),
+            )
+        )
         self.video_recorder = EpisodeVideoRecorder(
             VideoConfig(
                 enabled=bool(benchmark_config.get("videos", False)),
@@ -65,6 +71,7 @@ class BenchmarkRunner:
             "inference_mode",
             bool(benchmark_config.get("deterministic_decoding", True)),
         )
+        class_specific_args.setdefault("collect_model_logs", self._model_logs)
 
         if skip_judge:
             worker = None
@@ -131,6 +138,9 @@ class BenchmarkRunner:
         self,
         episode_id: str,
     ) -> None:
+        if self.result_manager is None:
+            raise RuntimeError("ResultManager has not been initialized")
+        self.result_manager.start_episode_model_logs(episode_id)
         self._episode_started_at[episode_id] = time.monotonic()
         self._progress_logger.info(
             "EPISODE_STARTED episode=%s",
@@ -158,6 +168,21 @@ class BenchmarkRunner:
             judge_mode="skipped" if self._skip_judge else "backend",
             sim_backend=self._sim_backend,
             seed=self._seed,
+            model_logs=self._model_logs,
+        )
+
+    def _record_model_diagnostics(
+        self,
+        episode_id: str,
+        stage_index: int,
+        diagnostics: List[Dict],
+    ) -> None:
+        if self.result_manager is None:
+            raise RuntimeError("ResultManager has not been initialized")
+        self.result_manager.record_model_diagnostics(
+            episode_id,
+            stage_index,
+            diagnostics,
         )
 
     def _run_group(self, group: GroupRunner) -> None:
@@ -260,6 +285,11 @@ class BenchmarkRunner:
                         seed=self._seed,
                         video_recorder=self.video_recorder,
                         on_episode_started=self._record_episode_started,
+                        on_model_diagnostics=(
+                            self._record_model_diagnostics
+                            if self._model_logs
+                            else None
+                        ),
                     )
                     self._run_group(group_runner)
                 self.video_recorder.finish_scenario()

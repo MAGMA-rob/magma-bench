@@ -43,6 +43,10 @@ AGENT_MODES = {
         name="history_reactive",
         packet="magma_bench.agents.history_reactive",
     ),
+    "history_summary_reactive": BenchmarkAgentMode(
+        name="history_summary_reactive",
+        packet="magma_bench.agents.history_summary_reactive",
+    ),
     "task_state_reactive": BenchmarkAgentMode(
         name="task_state_reactive",
         packet="magma_bench.agents.task_state_reactive",

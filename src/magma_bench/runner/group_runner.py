@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 from magma_core.base.agents import ValidAgentAnswer
 from magma_core.base.data_structures import (
@@ -62,12 +62,16 @@ class GroupRunner:
         seed: int = 0,
         video_recorder: Optional[EpisodeVideoRecorder] = None,
         on_episode_started: Optional[Callable[[str], None]] = None,
+        on_model_diagnostics: Optional[
+            Callable[[str, int, List[Dict[str, Any]]], None]
+        ] = None,
     ) -> None:
         self.scenario = scenario
         self.group = group
         self.executor_ref = executor_ref
         self.on_episode_finished = on_episode_finished
         self.on_episode_started = on_episode_started
+        self.on_model_diagnostics = on_model_diagnostics
         self.video_recorder = video_recorder or EpisodeVideoRecorder(
             VideoConfig(enabled=False)
         )
@@ -127,6 +131,15 @@ class GroupRunner:
                 env_idx,
                 episode_data.situation.attributes,
             ).stage_id
+            if (
+                self.on_model_diagnostics is not None
+                and result.model_diagnostics
+            ):
+                self.on_model_diagnostics(
+                    episode_data.episode_id,
+                    stage_index,
+                    result.model_diagnostics,
+                )
             answer_event = episode_data.record_trace(
                 stage_index,
                 "agent_answer",

@@ -2,10 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import hashlib
+import json
 import os
 from pathlib import Path
 import tempfile
-from typing import Dict, List, Literal, Optional, Sequence, Set
+from typing import Any, Dict, List, Literal, Optional, Sequence, Set
 
 from magma_bench.artifacts import BenchmarkManifest, load_json_model
 from magma_bench.data_structures import Episode, Scenario
@@ -93,6 +94,25 @@ def _write_model_atomic(path: Path, model) -> None:
         raise
 
 
+def _write_text_atomic(path: Path, payload: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as temporary:
+        temporary.write(payload)
+        temporary_path = Path(temporary.name)
+    try:
+        os.replace(temporary_path, path)
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
+
+
 class ResultManager:
     """Persist episode traces and derive resumable scenario/global metrics."""
 
@@ -105,10 +125,14 @@ class ResultManager:
         judge_mode: Literal["backend", "skipped"] = "backend",
         sim_backend: str = "auto",
         seed: int = 0,
+        model_logs: bool = False,
     ) -> None:
         self.results_path = results_path.resolve()
         self.benchmark_root = benchmark_root.resolve()
         self.scenarios = tuple(scenarios)
+        self.model_logs = model_logs
+        self._model_log_directories: Dict[str, Path] = {}
+        self._model_log_counters: Dict[str, int] = {}
         self.scenario_by_id = {
             scenario.scenario_id: scenario for scenario in self.scenarios
         }
@@ -258,6 +282,123 @@ class ResultManager:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def start_episode_model_logs(self, episode_id: str) -> None:
+        """Prepare an isolated model-log directory for one episode attempt."""
+
+        if not self.model_logs:
+            return
+        if self.active_scenario_id is None:
+            raise RuntimeError("No scenario is active")
+        binding = self.episode_bindings.get(episode_id)
+        if binding is None:
+            raise KeyError(f"Unknown episode {episode_id!r}")
+        scenario_id, episode = binding
+        if scenario_id != self.active_scenario_id:
+            raise ValueError(
+                f"Episode {episode_id!r} belongs to {scenario_id!r}, "
+                f"not active scenario {self.active_scenario_id!r}"
+            )
+        path = (
+            self._partial_scenario_path(scenario_id)
+            / "model_logs"
+            / episode.skeleton_id
+            / episode.semantic.semantic_id
+            / episode.condition
+        )
+        path.mkdir(parents=True, exist_ok=True)
+        for existing in path.iterdir():
+            if (
+                existing.is_file()
+                and existing.suffix == ".txt"
+                and existing.name[:4].isdigit()
+                and existing.name[4:5] == "_"
+            ):
+                existing.unlink()
+        self._model_log_directories[episode_id] = path
+        self._model_log_counters[episode_id] = 0
+
+    def record_model_diagnostics(
+        self,
+        episode_id: str,
+        stage_index: int,
+        diagnostics: List[Dict[str, Any]],
+    ) -> None:
+        """Persist ordered model inputs and outputs for one benchmark turn."""
+
+        if not self.model_logs:
+            return
+        directory = self._model_log_directories.get(episode_id)
+        if directory is None:
+            raise RuntimeError(
+                f"Model logs were not initialized for episode {episode_id!r}"
+            )
+        counter = self._model_log_counters[episode_id]
+        for diagnostic in diagnostics:
+            component = str(diagnostic.get("component", "model"))
+            safe_component = "".join(
+                char if char.isalnum() or char in {"-", "_"} else "_"
+                for char in component
+            ) or "model"
+            body = [
+                f"EPISODE: {episode_id}",
+                f"STAGE_INDEX: {stage_index}",
+                f"CALL_INDEX: {counter}",
+                f"MODEL: {component}",
+            ]
+            model_input = diagnostic.get("input", {})
+            if not isinstance(model_input, dict):
+                model_input = {"input": model_input}
+            for key in (
+                "instruction",
+                "summary",
+                "permanent_rules",
+                "rules",
+                "goals",
+                "attributes",
+                "history",
+            ):
+                if key not in model_input:
+                    continue
+                value = model_input[key]
+                if isinstance(value, list):
+                    rendered = (
+                        "\n".join(str(item) for item in value)
+                        if value
+                        else "(empty)"
+                    )
+                elif isinstance(value, str):
+                    rendered = value
+                else:
+                    rendered = json.dumps(
+                        value,
+                        ensure_ascii=False,
+                        indent=2,
+                        default=str,
+                    )
+                body.extend(("", key.replace("_", " ").upper(), rendered))
+
+            raw_output = diagnostic.get("raw_output")
+            if isinstance(raw_output, str):
+                rendered_output = raw_output
+            else:
+                rendered_output = json.dumps(
+                    raw_output,
+                    ensure_ascii=False,
+                    indent=2,
+                    default=str,
+                )
+            body.extend(("", "OUTPUT", rendered_output))
+
+            error = diagnostic.get("error")
+            if error:
+                body.extend(("", "ERROR", str(error)))
+            _write_text_atomic(
+                directory / f"{counter:04d}_{safe_component}.txt",
+                "\n".join(body) + "\n",
+            )
+            counter += 1
+        self._model_log_counters[episode_id] = counter
+
     def record_episode(self, outcome: EpisodeOutcome) -> None:
         if self.active_scenario_id is None:
             raise RuntimeError("No scenario is active")
@@ -295,6 +436,8 @@ class ResultManager:
                 )
         _write_model_atomic(path, result)
         self._pending_episode_ids.remove(outcome.episode_id)
+        self._model_log_directories.pop(outcome.episode_id, None)
+        self._model_log_counters.pop(outcome.episode_id, None)
 
     def finish_scenario(self, scenario: Scenario) -> Optional[ScenarioResult]:
         if self.active_scenario_id != scenario.scenario_id:

@@ -22,3 +22,23 @@ python -m magma_bench.launch history_reactive \
 Each executed episode produces an annotated MP4 in its scenario `videos/`
 directory. Enabling videos while resuming an existing run records only the
 episodes that are actually replayed.
+
+## Per-episode model logs
+
+Use `--logs` (or `--model-logs`) with the task-state-reactive agent to save
+compact, ordered inputs and raw outputs for every TSM and Dispatcher call.
+Parsing errors are included when present:
+
+```bash
+python -m magma_bench.launch task_state_reactive \
+  --benchmark_root /path/to/magma-benchmark-files \
+  --logs
+```
+
+While a scenario is running, logs are written under
+`scenarios/.partial/<scenario>/model_logs/<skeleton>/<semantic>/<condition>/`.
+They move with the scenario directory when it completes.
+
+The same option supports `history_summary_reactive`. It records a Summarizer
+file only when summarization occurs, followed by the Commander file for that
+turn.

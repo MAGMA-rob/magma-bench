@@ -220,6 +220,48 @@ def test_initial_payload_uses_current_protocol_and_persists_runtime() -> None:
     }
 
 
+def test_model_diagnostics_follow_tsm_dispatcher_recall_order() -> None:
+    first = build_response(
+        3,
+        EMPTY_STATE,
+        ACTIVE_STATE,
+        message={"recipient": "tsm", "content": "Clarify the task"},
+        tsm_called=True,
+    )
+    second = build_response(
+        3,
+        ACTIVE_STATE,
+        ACTIVE_STATE,
+        tools=[{
+            "robot": "robot",
+            "name": "pick",
+            "arguments": {"object": "cube"},
+        }],
+        tsm_called=True,
+    )
+    agent, _ = build_agent([{3: first}, {3: second}])
+    agent.collect_model_logs = True
+
+    result = agent.compute_agent_results({3: build_situation()})[0]
+
+    assert [
+        diagnostic["component"]
+        for diagnostic in result.model_diagnostics
+    ] == ["tsm", "dispatcher", "tsm", "dispatcher"]
+    assert result.model_diagnostics[0]["input"]["instruction"] == "instruction"
+    assert result.model_diagnostics[0]["input"]["permanent_rules"] == [
+        "Handle objects carefully"
+    ]
+    assert "tools" not in result.model_diagnostics[-1]["input"]
+    assert "parsed_output" not in result.model_diagnostics[-1]
+    assert "state" not in result.model_diagnostics[-1]
+
+    assert agent._dispatcher_history_bodies(TOOL_HISTORY) == [
+        '{"robot": "robot", "name": "pick", '
+        '"arguments": {"object": "cube"}}'
+    ]
+
+
 def test_dispatcher_to_tsm_recalls_are_rebatched() -> None:
     first_batch = {
         env_idx: build_response(
