@@ -34,6 +34,9 @@ from magma_bench.results.models import EpisodeOutcome, EpisodeTerminal
 from magma_bench.video import EpisodeVideoRecorder, VideoConfig
 
 
+MAX_CONSECUTIVE_NON_PHYSICAL_AGENT_TURNS = 3
+
+
 @dataclass(frozen=True)
 class BenchmarkTick:
     to_agents: Dict[int, EpisodeSituation]
@@ -72,6 +75,7 @@ class GroupRunner:
         self.skill_managers: Dict[int, SkillManager] = {}
         self.skill_state_refs: Dict[int, SkillStateRef] = {}
         self.pending_agent_inputs: Dict[int, EpisodeSituation] = {}
+        self.consecutive_non_physical_agent_turns: Dict[int, int] = {}
         self.group_exhausted = False
 
         executor_ref.initialize_group(
@@ -172,7 +176,27 @@ class GroupRunner:
                     )
                 }
             )
+            self.consecutive_non_physical_agent_turns[env_idx] += 1
             self._consume_skill_tick(manager.tick({}), to_executor)
+            if env_idx not in self.episode_data_per_env:
+                continue
+            if (
+                self.consecutive_non_physical_agent_turns[env_idx]
+                >= MAX_CONSECUTIVE_NON_PHYSICAL_AGENT_TURNS
+            ):
+                # A say-only executor request is not physical progress and must
+                # not survive termination of the episode.
+                to_executor.pop(env_idx, None)
+                self._finish_episode(
+                    env_idx,
+                    success=False,
+                    terminal_status="protocol_failure",
+                    reason=(
+                        "The agent produced "
+                        f"{MAX_CONSECUTIVE_NON_PHYSICAL_AGENT_TURNS} consecutive "
+                        "answers without launching a physical tool call."
+                    ),
+                )
 
         to_agents = {
             env_idx: situation.snapshot()
@@ -201,6 +225,7 @@ class GroupRunner:
         self.episode_data_per_env[env_idx] = episode_data
         self.skill_managers[env_idx] = manager
         self.skill_state_refs[env_idx] = state_ref
+        self.consecutive_non_physical_agent_turns[env_idx] = 0
         if self.on_episode_started is not None:
             self.on_episode_started(episode_data.episode_id)
         stage_index = self.executor_ref.get_skill_execution_context(
@@ -272,6 +297,7 @@ class GroupRunner:
         self.video_recorder.finish_episode(env_idx, terminal_status)
         self.on_episode_finished(outcome)
         self.pending_agent_inputs.pop(env_idx, None)
+        self.consecutive_non_physical_agent_turns.pop(env_idx, None)
         manager = self.skill_managers.pop(env_idx)
         manager.reset_states()
         self.skill_state_refs.pop(env_idx)
@@ -280,6 +306,8 @@ class GroupRunner:
         self._register_next_episode()
 
     def _handle_terminal_status(self, env_idx: int, status: ToolStatus) -> bool:
+        if status.stage_success == StageSuccess.FINISH:
+            self.consecutive_non_physical_agent_turns[env_idx] = 0
         if status.stage_success == StageSuccess.FAILED:
             if status.failure_diagnostics is not None:
                 self.episode_data_per_env[env_idx].record_trace(
@@ -357,6 +385,8 @@ class GroupRunner:
                     executed_answer,
                     hold=bool(executed_answer.get_say()),
                 )
+                if result.request.calls:
+                    self.consecutive_non_physical_agent_turns[env_idx] = 0
                 to_executor[env_idx] = result.request
                 continue
 

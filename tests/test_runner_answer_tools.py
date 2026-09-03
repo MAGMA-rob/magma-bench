@@ -134,6 +134,57 @@ class FakeSkillManager:
         return Tick({})
 
 
+class NonPhysicalLoopSkillManager(FakeSkillManager):
+    def __init__(self, skill_types):
+        super().__init__(skill_types)
+        self.next_state_ref = 2
+
+    def tick(self, _statuses):
+        if not self.registrations:
+            return Tick({})
+        env_idx, registration = self.registrations.popitem()
+        call = registration.answer.get_action()[0]
+        if call.name == "physical_tool":
+            return Tick(
+                {
+                    env_idx: SkillExecutionResult(
+                        env_idx,
+                        ValidExecutionReq(
+                            env_idx,
+                            registration.answer.agent_step_id,
+                            [call],
+                            "",
+                        ),
+                        registration.answer,
+                    )
+                }
+            )
+        status = ToolStatus(
+            robots_status=[
+                RobotToolStatus(
+                    call.target_robot_name,
+                    "The control call did not launch a physical tool.",
+                    False,
+                    ToolErrorFlag.BAD_CALL,
+                )
+            ],
+            stage_id=0,
+            attributes={"known_robots": ["robot"]},
+            error_descriptions=[""],
+            stage_success=StageSuccess.ONGOING,
+        )
+        state_ref = SkillStateRef(self.next_state_ref)
+        self.next_state_ref += 1
+        return Tick(
+            {
+                env_idx: SkillStatusResult(
+                    env_idx,
+                    SkillStatusEvent(status, state_ref, registration.answer),
+                )
+            }
+        )
+
+
 def test_group_runner_emits_one_traced_outcome_for_invalid_answer(monkeypatch):
     monkeypatch.setattr(group_runner_module, "SkillManager", FakeSkillManager)
     outcomes = []
@@ -247,6 +298,102 @@ def test_empty_answer_without_suspended_work_is_protocol_failure(monkeypatch):
     )
 
     assert outcomes[0].terminal.status == "protocol_failure"
+
+
+def test_group_runner_stops_after_three_non_physical_agent_turns(monkeypatch):
+    monkeypatch.setattr(
+        group_runner_module,
+        "SkillManager",
+        NonPhysicalLoopSkillManager,
+    )
+    outcomes = []
+    runner = GroupRunner(
+        scenario=SimpleNamespace(skill_types=()),
+        group=FakeEpisodeGroup(),
+        executor_ref=FakeExecutor(),
+        on_episode_finished=outcomes.append,
+    )
+    runner.tick({}, [])
+
+    for step in range(3):
+        answer = ValidAgentAnswer(
+            0,
+            step,
+            "",
+            [Call("control_only", {}, "robot")],
+        )
+        tick = runner.tick(
+            {},
+            [
+                BenchmarkAgentResult(
+                    answer=answer,
+                    situation=runner.episode_data_per_env[0].situation,
+                )
+            ],
+        )
+        assert tick.to_executor == {}
+
+    assert runner.is_done()
+    assert len(outcomes) == 1
+    assert outcomes[0].terminal.status == "protocol_failure"
+    assert outcomes[0].terminal.reason == (
+        "The agent produced 3 consecutive answers without launching a physical "
+        "tool call."
+    )
+
+
+def test_physical_tool_call_resets_non_physical_turn_limit(monkeypatch):
+    monkeypatch.setattr(
+        group_runner_module,
+        "SkillManager",
+        NonPhysicalLoopSkillManager,
+    )
+    outcomes = []
+    runner = GroupRunner(
+        scenario=SimpleNamespace(skill_types=()),
+        group=FakeEpisodeGroup(),
+        executor_ref=FakeExecutor(),
+        on_episode_finished=outcomes.append,
+    )
+    runner.tick({}, [])
+
+    for step in range(2):
+        answer = ValidAgentAnswer(
+            0,
+            step,
+            "",
+            [Call("control_only", {}, "robot")],
+        )
+        runner.tick(
+            {},
+            [
+                BenchmarkAgentResult(
+                    answer=answer,
+                    situation=runner.episode_data_per_env[0].situation,
+                )
+            ],
+        )
+
+    physical_answer = ValidAgentAnswer(
+        0,
+        2,
+        "",
+        [Call("physical_tool", {}, "robot")],
+    )
+    tick = runner.tick(
+        {},
+        [
+            BenchmarkAgentResult(
+                answer=physical_answer,
+                situation=runner.episode_data_per_env[0].situation,
+            )
+        ],
+    )
+
+    assert list(tick.to_executor) == [0]
+    assert tick.to_executor[0].calls == physical_answer.get_action()
+    assert runner.consecutive_non_physical_agent_turns[0] == 0
+    assert outcomes == []
 
 
 def test_group_runner_consumes_typed_skill_results(monkeypatch):
