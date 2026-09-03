@@ -20,7 +20,7 @@ class EpisodeSituation:
 
     ``memory`` is the task representation exposed to every agent family.
     ``agent_state`` is an opaque extension point for adapter-specific runtime
-    values such as completed task-state goals or todos.
+    values such as a task-state snapshot and its Dispatcher history.
     """
 
     tools: List[Dict]
