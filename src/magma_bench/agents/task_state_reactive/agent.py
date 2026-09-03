@@ -4,7 +4,11 @@ from copy import deepcopy
 import json
 from typing import Any, Dict, List
 
-from magma_core.base.agents import AgentAnswer, BadAgentAnswer
+from magma_core.base.agents import (
+    AgentAnswer,
+    BadAgentAnswer,
+    ValidAgentAnswer,
+)
 from magma_core.base.data_structures import EmptyInstruction, StatusReturn
 from magma_core.protocol.agent import AgentOutput
 from magma_core.protocol.tsr import (
@@ -326,9 +330,12 @@ class TaskStateReactiveBenchmarkAgent(BenchmarkAgent):
                         response.output,
                         agent_step_id,
                     )
-                output = dict(response.output)
-                output["say"] = message.content
-                response = response.model_copy(update={"output": output})
+                return ValidAgentAnswer(
+                    source_node_id=response.source_id,
+                    agent_step_id=agent_step_id,
+                    say=message.content,
+                    calls=[],
+                )
         return super().normalize_model_response(response, agent_step_id)
 
     @staticmethod
