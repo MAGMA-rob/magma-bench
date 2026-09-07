@@ -42,3 +42,11 @@ They move with the scenario directory when it completes.
 The same option supports `history_summary_reactive`. It records a Summarizer
 file only when summarization occurs, followed by the Commander file for that
 turn.
+
+## Commandes
+
+| Commande | Fonctionnement |
+|---|---|
+| `magma-bench run` | Évaluer un benchmark |
+
+`magma-bench --help`, `magma-bench <commande> --help` et `magma-bench --version`.

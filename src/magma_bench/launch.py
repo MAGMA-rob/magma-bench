@@ -1,4 +1,3 @@
-from .runner import BenchmarkRunner
 from magma_core.utils.text_utils import auto_cast
 from magma_core.configs import MAGMAConfig
 
@@ -10,7 +9,7 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("agent", type=str, help="Benchmark agent mode to evaluate.")
     parser.add_argument(
-        "--benchmark_root",
+        '--benchmark-root', '--benchmark_root',
         type=Path,
         default=None,
         help="Directory produced by magma-bench-build.",
@@ -22,36 +21,36 @@ def parse_args():
         help="One or more scenario IDs or names; all their episodes are run.",
     )
     parser.add_argument(
-        "--config_path", "-c",
+        '--config-path', '--config_path', "-c",
         type=str,
         default=None,
         help="Custom config to pass to MAGMA-GEN."
     )
 
     parser.add_argument(
-        "--verifier_backend", '-vb',
+        '--verifier-backend', '--verifier_backend', '-vb',
         type=str,
         help="Which backend instance to use for the verifier."
     )
     parser.add_argument(
-        "--magma_agent_address", '-mas',
+        '--magma-agent-address', '--magma_agent_address', '-mas',
         type=str,
         help="The address of the magma_agent server to use for this generation."
     )
     parser.add_argument(
         "-b",
-        "--sim_backend",
+        '--sim-backend', "--sim_backend",
         choices=("auto", "cpu", "gpu"),
         help="Simulation backend.",
     )
-    parser.add_argument("--save_dir", type=str, help="where to save videos, log, result of the benchmark")
+    parser.add_argument('--save-dir', '--save_dir', type=str, help="where to save videos, log, result of the benchmark")
     parser.add_argument(
-        "--results_path",
+        '--results-path', '--results_path',
         type=Path,
         help="Exact result directory to create or resume.",
     )
     parser.add_argument(
-        "--deterministic_decoding",
+        '--deterministic-decoding', '--deterministic_decoding',
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Request greedy inference from magma_agent (default: enabled).",
@@ -75,17 +74,17 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        "--video_fps",
+        '--video-fps', '--video_fps',
         type=int,
         help="Annotated video frame rate (default: 20).",
     )
     parser.add_argument(
-        "--video_hold_seconds",
+        '--video-hold-seconds', '--video_hold_seconds',
         type=float,
         help="Duration of non-physical video events (default: 1 second).",
     )
     parser.add_argument(
-        "--skip_judge",
+        '--skip-judge', '--skip_judge',
         action="store_true",
         help="Auto-validate text answers without starting a judge backend.",
     )
@@ -153,6 +152,8 @@ def resolve_config_path(path: Optional[str]) -> Optional[Path]:
     return None
 
 def main(args : argparse.Namespace):
+    from .runner import BenchmarkRunner
+
     print(f"[MAGMA-BENCH] Loading...")
 
     override_dict = build_override_dict(args)
