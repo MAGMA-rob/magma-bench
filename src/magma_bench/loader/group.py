@@ -3,7 +3,7 @@ import json
 from typing import Dict, List, Optional, Set, Tuple
 
 from magma_bench.data_structures import Episode, Scenario
-from magma_core.base.tasks import InitializationParameters
+from magma_core.simulation.tasks import InitializationParameters
 
 
 @dataclass

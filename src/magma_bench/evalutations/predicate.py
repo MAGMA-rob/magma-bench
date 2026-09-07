@@ -1,6 +1,6 @@
 from typing import Dict, List
 
-from magma_core.base.goals import BaseGoal
+from magma_core.simulation.goals import BaseGoal
 
 from ._predicate_compiler import PredicateCompiler
 from ._predicate_registry import (

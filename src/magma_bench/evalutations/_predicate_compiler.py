@@ -1,6 +1,6 @@
 from typing import Any, Dict, List
 
-from magma_core.base.goals import BaseGoal, Or
+from magma_core.simulation.goals import BaseGoal, Or
 
 from ._predicate_registry import PredicateDefinition
 

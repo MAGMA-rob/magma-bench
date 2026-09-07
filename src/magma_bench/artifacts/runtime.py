@@ -10,17 +10,17 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Iterable, List, Optional
 
-from magma_core.base.data_structures import Instruction, StageInput
-from magma_core.base.errors import BaseError
-from magma_core.base.goals import BaseGoal
-from magma_core.base.randomizer import RandomizationSpec, RuntimeRandomizer
-from magma_core.base.stage import (
+from magma_core.simulation.data_structures import Instruction, StageInput
+from magma_core.simulation.errors import BaseError
+from magma_core.simulation.goals import BaseGoal
+from magma_core.simulation.randomizer import RandomizationSpec, RuntimeRandomizer
+from magma_core.simulation.stage import (
     BaseTaskStage,
     StageErrorParameters,
     StageGlobalParameters,
 )
-from magma_core.base.tasks import BaseTask
-from magma_core.serialization import decode_value
+from magma_core.simulation.tasks import BaseTask
+from magma_core.simulation.serialization import canonical_type_name, decode_value, encode_value
 
 from magma_bench.evalutations.log_rules import compile_log_rules
 
@@ -246,8 +246,8 @@ def deserialize_serialized_stage(
     if validate_presentation:
         round_trip_spec = stage.to_spec()
         if (
-            round_trip_spec["type"] != spec.stage_type
-            or round_trip_spec["arguments"] != spec.arguments
+            round_trip_spec["type"] != canonical_type_name(spec.stage_type)
+            or round_trip_spec["arguments"] != encode_value(decode_value(spec.arguments))
         ):
             raise ValueError(
                 f"Serialized stage {spec.id!r} arguments do not round-trip exactly"

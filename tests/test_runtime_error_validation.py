@@ -28,9 +28,9 @@ def _load_scenario_class():
         "magma_bench.executor",
         "magma_bench.evalutations",
         "magma_core",
-        "magma_core.base",
-        "magma_core.base.data_structures",
-        "magma_core.base.tasks",
+        "magma_core.simulation",
+        "magma_core.simulation.data_structures",
+        "magma_core.simulation.tasks",
         "magma_scenarios",
     ]
     previous_modules = {name: sys.modules.get(name) for name in module_names}
@@ -61,13 +61,13 @@ def _load_scenario_class():
         sys.modules["magma_bench.evalutations"] = evalutations_module
 
         sys.modules["magma_core"] = types.ModuleType("magma_core")
-        sys.modules["magma_core.base"] = types.ModuleType("magma_core.base")
-        data_structures_module = types.ModuleType("magma_core.base.data_structures")
+        sys.modules["magma_core.simulation"] = types.ModuleType("magma_core.simulation")
+        data_structures_module = types.ModuleType("magma_core.simulation.data_structures")
         data_structures_module.ActiveStageErrorState = dict
-        sys.modules["magma_core.base.data_structures"] = data_structures_module
-        tasks_module = types.ModuleType("magma_core.base.tasks")
+        sys.modules["magma_core.simulation.data_structures"] = data_structures_module
+        tasks_module = types.ModuleType("magma_core.simulation.tasks")
         tasks_module.BaseBenchmarkTask = object
-        sys.modules["magma_core.base.tasks"] = tasks_module
+        sys.modules["magma_core.simulation.tasks"] = tasks_module
 
         magma_scenarios_module = types.ModuleType("magma_scenarios")
         magma_scenarios_module.load_preset = lambda _name: None

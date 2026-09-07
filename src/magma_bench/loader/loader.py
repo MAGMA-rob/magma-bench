@@ -3,9 +3,9 @@
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
 
-from magma_core.base.tools import BaseToolsAPI
-from magma_core.base.skills import BaseSkill, CancelCurrentActionSkill
-from magma_core.serialization import load_spec
+from magma_core.simulation.tools import BaseToolsAPI
+from magma_core.simulation.skills import BaseSkill, CancelCurrentActionSkill
+from magma_core.simulation.serialization import load_spec
 
 from magma_bench.artifacts import (
     BenchmarkManifest,

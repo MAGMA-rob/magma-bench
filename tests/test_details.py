@@ -68,9 +68,9 @@ benchmark_module.task_has_recovery_criterion = _task_has_recovery_criterion
 sys.modules["magma_scenarios"] = types.ModuleType("magma_scenarios")
 sys.modules["magma_scenarios.benchmark"] = benchmark_module
 
-data_structures_module = types.ModuleType("magma_core.base.data_structures")
+data_structures_module = types.ModuleType("magma_core.simulation.data_structures")
 data_structures_module.ActiveStageErrorState = dict
-goals_module = types.ModuleType("magma_core.base.goals")
+goals_module = types.ModuleType("magma_core.simulation.goals")
 
 
 class _Log:
@@ -137,12 +137,12 @@ text_utils_module.star_extractor = lambda entity_names, pattern: [
 ]
 
 sys.modules["magma_core"] = types.ModuleType("magma_core")
-base_module = types.ModuleType("magma_core.base")
+base_module = types.ModuleType("magma_core.simulation")
 base_module.__path__ = []
-sys.modules["magma_core.base"] = base_module
+sys.modules["magma_core.simulation"] = base_module
 data_structures_module.Log = _Log
-sys.modules["magma_core.base.data_structures"] = data_structures_module
-sys.modules["magma_core.base.goals"] = goals_module
+sys.modules["magma_core.simulation.data_structures"] = data_structures_module
+sys.modules["magma_core.simulation.goals"] = goals_module
 sys.modules["magma_core.utils"] = types.ModuleType("magma_core.utils")
 sys.modules["magma_core.utils.text_utils"] = text_utils_module
 

@@ -3,8 +3,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional, Tuple
 from enum import Enum
 
-from magma_core.base.agents import AgentAnswer
-from magma_core.base.data_structures import Instruction
+from magma_core.simulation.agents import AgentAnswer
+from magma_core.simulation.data_structures import Instruction
 from magma_core.utils.data_utils import apply_att_modif
 
 from magma_bench.results.models import TraceEvent

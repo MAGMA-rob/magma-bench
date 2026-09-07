@@ -10,19 +10,18 @@ import pytest
 
 pytest.importorskip("sapien")
 
-from magma_core.base.agents import BadAgentAnswer, ValidAgentAnswer
-from magma_core.base.data_structures import (
-    Call,
+from magma_core.simulation.agents import BadAgentAnswer, ValidAgentAnswer
+from magma_core.domain import Call, ValidExecutionReq
+from magma_core.simulation.data_structures import (
     RobotToolStatus,
     StageInput,
     StageSuccess,
     ToolErrorFlag,
     ToolStatus,
     UserInstruction,
-    ValidExecutionReq,
 )
-from magma_core.base.stage import AskingBaseStage
-from magma_core.base.skills import (
+from magma_core.simulation.stage import AskingBaseStage
+from magma_core.simulation.skills import (
     DeferredInputTransition,
     SkillDeferredInputResult,
     SkillExecutionResult,
@@ -30,7 +29,7 @@ from magma_core.base.skills import (
     SkillStatusEvent,
     SkillStatusResult,
 )
-from magma_core.base.skills.structure import Tick
+from magma_core.simulation.skills.structure import Tick
 
 from magma_bench.data_structures import (
     BenchmarkAgentResult,

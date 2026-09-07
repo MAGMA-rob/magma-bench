@@ -2,10 +2,11 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
 
-from magma_core.base.data_structures import EnvToolContext, SavedEnvData, ValidExecutionReq
-from magma_core.base.randomizer import RuntimeRandomizer
-from magma_core.base.skills.skill_manager import SkillAPIProvider
-from magma_core.base.tasks import BaseTask
+from magma_core.simulation.data_structures import EnvToolContext, SavedEnvData
+from magma_core.domain import ValidExecutionReq
+from magma_core.simulation.randomizer import RuntimeRandomizer
+from magma_core.simulation.skills.skill_manager import SkillAPIProvider
+from magma_core.simulation.tasks import BaseTask
 
 from magma_bench.data_structures import Episode
 

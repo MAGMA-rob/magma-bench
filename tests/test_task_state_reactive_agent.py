@@ -7,7 +7,7 @@ import pytest
 pytest.importorskip("sapien")
 pytest.importorskip("mani_skill")
 
-from magma_core.base.data_structures import StatusReturn
+from magma_core.simulation.data_structures import StatusReturn
 from magma_core.protocol.agent import AgentOutput
 from magma_core.protocol.tsr import TaskStateReactiveResult
 

@@ -8,8 +8,8 @@ the evaluation pipeline after loading those files.
 from dataclasses import dataclass
 from typing import Any, Dict, Tuple, Type
 
-from magma_core.base.tools import BaseToolsAPI
-from magma_core.base.skills import BaseSkill
+from magma_core.simulation.tools import BaseToolsAPI
+from magma_core.simulation.skills import BaseSkill
 
 from magma_bench.artifacts import (
     EpisodeMetadata,

@@ -1,17 +1,17 @@
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Literal, Optional
 
-from magma_core.base.agents import ValidAgentAnswer
-from magma_core.base.data_structures import (
+from magma_core.simulation.agents import ValidAgentAnswer
+from magma_core.simulation.data_structures import (
     EmptyInstruction,
     StageState,
     StageSuccess,
     StatusReturn,
     ToolStatus,
     ToolErrorFlag,
-    ValidExecutionReq,
 )
-from magma_core.base.skills import (
+from magma_core.domain import ValidExecutionReq
+from magma_core.simulation.skills import (
     SkillDeferredInputResult,
     SkillExecutionResult,
     SkillManager,
@@ -19,7 +19,7 @@ from magma_core.base.skills import (
     SkillStateRef,
     SkillStatusResult,
 )
-from magma_core.base.skills.structure import Tick
+from magma_core.simulation.skills.structure import Tick
 
 from magma_bench.data_structures import (
     BenchmarkAgentResult,

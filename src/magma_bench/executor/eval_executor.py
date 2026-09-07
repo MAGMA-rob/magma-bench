@@ -13,22 +13,22 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 
-from magma_core.base.data_structures import (
+from magma_core.simulation.data_structures import (
     EnvToolContext,
     RobotToolStatus,
     SavedEnvData,
     StageSuccess,
     ToolErrorFlag,
     ToolStatus,
-    ValidExecutionReq,
 )
-from magma_core.base.data_structures.env import build_text_only_action_failure_status
-from magma_core.base.envs import DefaultEnv
-from magma_core.base.executor import ToolsBaseExecutor
-from magma_core.base.skills import SkillExecutionContext
-from magma_core.base.skills.skill_manager import SkillAPIProvider
+from magma_core.domain import ValidExecutionReq
+from magma_core.simulation.data_structures.env import build_text_only_action_failure_status
+from magma_core.simulation.envs import DefaultEnv
+from magma_core.simulation.executor import ToolsBaseExecutor
+from magma_core.simulation.skills import SkillExecutionContext
+from magma_core.simulation.skills.skill_manager import SkillAPIProvider
 from magma_core.protocol.payload.user_sim_payload import JudgePayload
-from magma_core.serialization import decode_value
+from magma_core.simulation.serialization import decode_value
 from magma_core.utils.global_utils import (
     apply_env_state_updates,
     batch_set_value,

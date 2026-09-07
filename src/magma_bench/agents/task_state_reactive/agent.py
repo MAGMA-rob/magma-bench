@@ -4,12 +4,12 @@ from copy import deepcopy
 import json
 from typing import Any, Dict, List
 
-from magma_core.base.agents import (
+from magma_core.simulation.agents import (
     AgentAnswer,
     BadAgentAnswer,
     ValidAgentAnswer,
 )
-from magma_core.base.data_structures import EmptyInstruction, StatusReturn
+from magma_core.simulation.data_structures import EmptyInstruction, StatusReturn
 from magma_core.protocol.agent import AgentOutput
 from magma_core.protocol.tsr import (
     TSRInstruction,

@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from itertools import product
 from typing import Any, Callable, Dict, List, Tuple
 
-from magma_core.base.goals import And, At, AtLeastCountAt, BaseGoal, NotAt, On
+from magma_core.simulation.goals import And, At, AtLeastCountAt, BaseGoal, NotAt, On
 from magma_core.utils.text_utils import star_extractor
 
 

@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Tuple
 
-from magma_core.base.data_structures import Log
+from magma_core.simulation.data_structures import Log
 
 
 RuleBuilder = Callable[[Dict[str, Any]], "BaseLogRule"]

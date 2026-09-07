@@ -11,7 +11,7 @@ from requests.exceptions import ConnectionError, RequestException
 
 from magma_bench.data_structures import BenchmarkAgentResult, EpisodeSituation
 
-from magma_core.base.agents import AgentAnswer, BadAgentAnswer, ValidAgentAnswer
+from magma_core.simulation.agents import AgentAnswer, BadAgentAnswer, ValidAgentAnswer
 from magma_core.protocol.agent import (
     AgentInput,
     AgentOutput,
@@ -261,7 +261,7 @@ class BenchmarkAgent(ABC):
         return output.get("action", {})
 
     def parse_calls(self, action: Any) -> List:
-        from magma_core.base.data_structures.agent_call import Call
+        from magma_core.domain.agent_call import Call
 
         if action in ({}, None, []):
             return []

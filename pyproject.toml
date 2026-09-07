@@ -6,10 +6,10 @@ name = "magma_bench"
 version = "1.0.0"
 description = "Benchmark code to execute and evaluate your model on the MAGMA-BENCHMARK"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = [
-    "magma_core>=1.0.0",
-    "magma_scenarios>=1.0.0",
+    "magma_core[simulation]>=1.0.0,<2.0.0",
+    "magma_scenarios>=1.0.0,<2.0.0",
     "pydantic>=2.0",
 ]
 

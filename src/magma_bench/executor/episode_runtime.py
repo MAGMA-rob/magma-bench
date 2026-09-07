@@ -2,7 +2,7 @@
 
 from copy import deepcopy
 
-from magma_core.base.tasks import BaseTask
+from magma_core.simulation.tasks import BaseTask
 
 from magma_bench.artifacts import deserialize_task_stages
 from magma_bench.data_structures import Episode, Scenario
