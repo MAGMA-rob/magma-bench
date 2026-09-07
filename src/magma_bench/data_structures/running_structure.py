@@ -66,6 +66,7 @@ class BenchmarkAgentResult:
 
     answer: AgentAnswer
     situation: EpisodeSituation
+    model_diagnostics: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class RunningState(Enum):

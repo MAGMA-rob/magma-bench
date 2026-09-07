@@ -21,6 +21,8 @@ from magma_core.tsr_engine import (
     ReactiveTaskState,
     normalize_dispatcher_history,
     prepare_dispatcher_turn,
+    render_dispatcher_view,
+    render_tsm_view,
 )
 
 from magma_bench.agents.base import BenchmarkAgent
@@ -42,6 +44,7 @@ class TaskStateReactiveBenchmarkAgent(BenchmarkAgent):
         remote_agent_name: str = "task_state_reactive",
         **args: Any,
     ) -> None:
+        self.collect_model_logs = bool(args.pop("collect_model_logs", False))
         super().__init__(
             agent_url=agent_url,
             remote_agent_name=remote_agent_name,
@@ -65,6 +68,9 @@ class TaskStateReactiveBenchmarkAgent(BenchmarkAgent):
         recall_counts = {env_idx: 0 for env_idx in batch_inputs}
         final_responses: Dict[int, AgentOutput] = {}
         failed_answers: Dict[int, BadAgentAnswer] = {}
+        model_diagnostics: Dict[int, List[Dict[str, Any]]] = {
+            env_idx: [] for env_idx in batch_inputs
+        }
 
         for env_idx, situation in batch_inputs.items():
             runtime = situation.agent_state.get(self.RUNTIME_KEY, {})
@@ -140,6 +146,19 @@ class TaskStateReactiveBenchmarkAgent(BenchmarkAgent):
             next_payloads: Dict[int, Dict[str, Any]] = {}
 
             for env_idx, response in responses.items():
+                if getattr(self, "collect_model_logs", False):
+                    try:
+                        records = self._extract_model_diagnostics(
+                            pending_payloads[env_idx], response
+                        )
+                    except Exception as error:
+                        records = [{
+                            "component": "diagnostic_error",
+                            "input": deepcopy(pending_payloads[env_idx]),
+                            "raw_output": deepcopy(response.output),
+                            "error": str(error),
+                        }]
+                    model_diagnostics[env_idx].extend(records)
                 if not response.valid:
                     final_responses[env_idx] = response
                     continue
@@ -242,9 +261,103 @@ class TaskStateReactiveBenchmarkAgent(BenchmarkAgent):
                 BenchmarkAgentResult(
                     answer=answer,
                     situation=updated,
+                    model_diagnostics=model_diagnostics[env_idx],
                 )
             )
         return results
+
+    @staticmethod
+    def _extract_model_diagnostics(
+        request: Dict[str, Any],
+        response: AgentOutput,
+    ) -> List[Dict[str, Any]]:
+        """Return ordered, human-readable records for one TSR server turn."""
+
+        try:
+            result = TaskStateReactiveResult.model_validate(response.output)
+        except (TypeError, ValueError) as error:
+            return [{
+                "component": "tsr_error",
+                "input": deepcopy(request),
+                "raw_output": deepcopy(response.output),
+                "error": str(error),
+            }]
+
+        records: List[Dict[str, Any]] = []
+        if result.tsm.called:
+            tsm_view = render_tsm_view(result.tsm.view)
+            records.append({
+                "component": "tsm",
+                "input": {
+                    "permanent_rules": deepcopy(
+                        request.get("persistent_rules", [])
+                    ),
+                    "rules": list(tsm_view.rules),
+                    "goals": list(tsm_view.goals),
+                    "instruction": result.tsm.instruction.content,
+                },
+                "raw_output": deepcopy(result.tsm.raw_output),
+                "error": result.tsm.error,
+            })
+
+        if result.dispatcher.called:
+            dispatcher_representation = deepcopy(result.dispatcher.view)
+            dispatcher_representation.setdefault(
+                "mode", result.dispatcher.mode
+            )
+            dispatcher_view = render_dispatcher_view(
+                dispatcher_representation
+            )
+            records.append({
+                "component": "dispatcher",
+                "input": {
+                    "permanent_rules": deepcopy(
+                        request.get("persistent_rules", [])
+                    ),
+                    "rules": list(dispatcher_view.rules),
+                    "goals": list(dispatcher_view.goals),
+                    "attributes": deepcopy(request.get("attributes", {})),
+                    "history": (
+                        TaskStateReactiveBenchmarkAgent
+                        ._dispatcher_history_bodies(
+                            result.dispatcher.input_history
+                        )
+                    ),
+                },
+                "raw_output": deepcopy(result.dispatcher.raw_output),
+                "error": result.dispatcher.error,
+            })
+
+        if not records and result.error is not None:
+            records.append({
+                "component": f"{result.error.component}_error",
+                "input": deepcopy(request),
+                "raw_output": deepcopy(result.error.raw_output),
+                "error": result.error.reason,
+            })
+        return records
+
+    @staticmethod
+    def _dispatcher_history_bodies(
+        history: List[Dict[str, Any]],
+    ) -> List[str]:
+        """Flatten Dispatcher history to one unlabeled message per line."""
+
+        bodies: List[str] = []
+        for entry in history:
+            payload = json.loads(entry["content"])
+            if entry["author"] == "MODEL":
+                bodies.extend(
+                    json.dumps(call, ensure_ascii=False)
+                    for call in payload["tools"]
+                )
+                continue
+            infos = payload["infos"]
+            if isinstance(infos, list):
+                bodies.extend(str(message) for message in infos)
+            else:
+                bodies.append(str(infos))
+        return bodies
 
     def _build_input(
         self,

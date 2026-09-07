@@ -64,6 +64,17 @@ def parse_args():
         help="Record one annotated MP4 per executed episode.",
     )
     parser.add_argument(
+        "--model-logs",
+        "--logs",
+        dest="model_logs",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "Save ordered per-episode TSM/Dispatcher inputs and outputs "
+            "(TSR agent)."
+        ),
+    )
+    parser.add_argument(
         "--video_fps",
         type=int,
         help="Annotated video frame rate (default: 20).",
