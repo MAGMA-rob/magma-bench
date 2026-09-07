@@ -22,7 +22,6 @@ from magma_bench.results.models import EpisodeOutcome
 from magma_bench.video import EpisodeVideoRecorder, VideoConfig
 
 from .group_runner import GroupRunner
-import magma_scenarios.envs # to load gym envs
 
 class BenchmarkRunner:
     """Load and execute compiled benchmark scenarios against one agent."""

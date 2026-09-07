@@ -3,6 +3,7 @@
 from copy import deepcopy
 
 from magma_core.simulation.tasks import BaseTask
+from magma_scenarios import register_environment
 
 from magma_bench.artifacts import deserialize_task_stages
 from magma_bench.data_structures import Episode, Scenario
@@ -11,6 +12,7 @@ from magma_bench.data_structures import Episode, Scenario
 def build_episode_task(scenario: Scenario, episode: Episode) -> BaseTask:
     """Build and validate one independent task runtime for an episode."""
 
+    register_environment(scenario.environment_id)
     task = BaseTask()
     task.name = episode.episode_id
     task.maniskill_env_id = scenario.environment_id
