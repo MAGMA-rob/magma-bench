@@ -112,7 +112,7 @@ class BenchmarkRunner:
         if benchmark_root is None:
             raise ValueError(
                 "A compiled benchmark root is required. Pass the directory "
-                "produced by magma-bench-build."
+                "produced by magma-bench-generator build."
             )
         self._benchmark_root = Path(benchmark_root).resolve()
         self._scenarios = load_scenarios(self._benchmark_root, scenarios)

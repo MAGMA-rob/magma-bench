@@ -12,7 +12,7 @@ def parse_args():
         '--benchmark-root', '--benchmark_root',
         type=Path,
         default=None,
-        help="Directory produced by magma-bench-build.",
+        help="Directory produced by magma-bench-generator build.",
     )
     
     parser.add_argument(
