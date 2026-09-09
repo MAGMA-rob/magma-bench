@@ -2,14 +2,15 @@ import time
 from datetime import datetime
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Type, Union
+from typing import Dict, List, Optional, Union
 
 from tqdm import tqdm
 
 from magma_core.configs.config import MAGMAConfig
 from magma_core.workers import LMWorker
+from magma_core.protocol.agent import JsonObject
 
-from magma_bench.agents import BenchmarkAgent, get_agent_mode
+from magma_bench.agents import BenchmarkAgent
 from magma_bench.data_structures import Scenario
 from magma_bench.executor import (
     PlannerRetryEvent,
@@ -28,9 +29,9 @@ class BenchmarkRunner:
 
     def __init__(
         self,
-        agent_mode_name: str,
         magma_config: MAGMAConfig,
-        class_specific_args: Dict,
+        extra_keys: JsonObject | None = None,
+        agent_name: str | None = None,
         skip_judge: bool = False,
     ) -> None:
         benchmark_config = magma_config.benchmark
@@ -62,15 +63,17 @@ class BenchmarkRunner:
             )
         )
 
-        agent_class: Type[BenchmarkAgent] = get_agent_mode(
-            agent_mode_name
-        ).load_agent_class()
-        class_specific_args.setdefault("agent_url", magma_config.magma_agent_address)
-        class_specific_args.setdefault(
-            "inference_mode",
-            bool(benchmark_config.get("deterministic_decoding", True)),
-        )
-        class_specific_args.setdefault("collect_model_logs", self._model_logs)
+        runtime_options = dict(benchmark_config.get("extra_keys", {}))
+        runtime_options.update(extra_keys or {})
+        deterministic = benchmark_config.get("deterministic_decoding", True)
+        if type(deterministic) is not bool:
+            raise ValueError("deterministic_decoding must be a boolean")
+        if "inference_mode" in runtime_options and (
+            type(runtime_options["inference_mode"]) is not bool
+            or runtime_options["inference_mode"] != deterministic
+        ):
+            raise ValueError("extra_keys.inference_mode conflicts with deterministic_decoding")
+        runtime_options["inference_mode"] = deterministic
 
         if skip_judge:
             worker = None
@@ -78,11 +81,14 @@ class BenchmarkRunner:
             verifier_backend = magma_config.backends[
                 benchmark_config["backend_verifier"]
             ]
-            class_specific_args.setdefault("backend_url", verifier_backend.endpoint)
-            class_specific_args.setdefault("backend_header", verifier_backend.headers)
             worker = LMWorker(verifier_backend)
 
-        self.agent = agent_class(**class_specific_args)
+        self.agent = BenchmarkAgent(
+            agent_url=magma_config.magma_agent_address,
+            agent_name=agent_name,
+            extra_keys=runtime_options,
+            collect_model_logs=self._model_logs,
+        )
         self._scenarios: List[Scenario] = []
         self._benchmark_root: Optional[Path] = None
         self._benchmark_config = benchmark_config

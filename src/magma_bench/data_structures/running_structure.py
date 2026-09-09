@@ -1,5 +1,5 @@
 import copy
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from typing import Any, Dict, List, Literal, Optional, Tuple
 from enum import Enum
 
@@ -12,32 +12,26 @@ from magma_bench.results.models import TraceEvent
 
 @dataclass
 class EpisodeSituation:
-    """Complete agent-visible state for one running benchmark episode.
-
-    The runner owns this object. Benchmark-agent adapters receive a snapshot
-    and return an updated snapshot, so their background thread never mutates
-    runner state directly.
-
-    ``memory`` is the task representation exposed to every agent family.
-    ``agent_state`` is an opaque extension point for adapter-specific runtime
-    values such as a task-state snapshot and its Dispatcher history.
-    """
+    """Episode observation with opaque memory owned by the remote runtime."""
 
     tools: List[Dict]
     attributes: Dict
     memory: Dict[str, Any]
     current_instruction: Instruction
-    history: List[Any] = field(default_factory=list)
-    agent_state: Dict[str, Any] = field(default_factory=dict)
+    history: InitVar[Optional[List[Any]]] = None
+
+    def __post_init__(self, history: Optional[List[Any]]) -> None:
+        self.memory = copy.deepcopy(self.memory)
+        if history is not None:
+            self.memory["history"] = copy.deepcopy(history)
+        else:
+            self.memory.setdefault("history", [])
 
     def modify_attributes(
         self,
         modif_list: List[Tuple[Literal["ADD", "REMOVE"], Tuple[str, str]]],
     ) -> None:
         apply_att_modif(self.attributes, modif_list)
-
-    def add_to_history(self, model_answer: Dict) -> None:
-        self.history.append(model_answer)
 
     def set_current_instruction(self, instruction: Instruction) -> None:
         self.current_instruction = instruction
@@ -54,9 +48,7 @@ class EpisodeSituation:
             "tools": self.tools,
             "attributes": self.attributes,
             "memory": self.memory,
-            "history": self.history,
             "current_instruction": self.current_instruction.to_spec(),
-            "agent_state": self.agent_state,
         }
 
 

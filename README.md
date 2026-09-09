@@ -1,52 +1,77 @@
-# magma-bench
-Official repository for MAGMA-BENCH. Evaluate your agents on highly-interactive robotic task, controlled via natural langage.
+# magma-bench 2.0.0
 
----
+Evaluate agents on interactive robotic tasks using the shared agent HTTP protocol
+v2. Bench executes and evaluates environment-visible decisions; the remote runtime
+owns memory, model calls and internal continuations. No agent package is required
+in the benchmark environment.
 
-Version 0.1 : MARS 2026
+## Run
 
-OFFICIAL CODE RELEASE **V1** : SEPTEMBER 2026
+Start a compatible agent server, then run:
+
+```bash
+magma-bench run \
+  --benchmark-root /path/to/magma-benchmark-files \
+  --agent-address http://localhost:8000 \
+  --agent-name experiment-1
+```
+
+The server must expose `/health`, `/v1/info` and `/v1/responses`. Bench validates
+protocol version `2.0` and requests one candidate per episode observation. The
+execution name defaults to the server's `agent_id`.
+
+The configuration address remains `magma_agent_address`. Runtime options can be
+provided as `benchmark.extra_keys` in the configuration and overridden with:
+
+```bash
+magma-bench run --benchmark-root /path/to/magma-benchmark-files \
+  --extra-keys '{"inference_mode": true}'
+```
+
+Deterministic decoding is enabled by default. Use `--no-deterministic-decoding`
+to disable it. A conflicting `extra_keys.inference_mode` is rejected.
+
+User instructions are sent as `user`; environment feedback is sent as `env`,
+including its complete JSON content. Initial history is placed in `memory.history`.
+Subsequent memory is replaced by the runtime's returned memory without inspection.
 
 ## Annotated episode videos
 
-Install the optional encoder dependencies and enable videos from the benchmark
-launcher:
-
 ```bash
 pip install -e '.[video]'
-python -m magma_bench.launch history_reactive \
-  --benchmark_root /path/to/magma-benchmark-files \
-  --videos --video_fps 20 --video_hold_seconds 1
+magma-bench run --benchmark-root /path/to/magma-benchmark-files \
+  --videos --video-fps 20 --video-hold-seconds 1
 ```
 
 Each executed episode produces an annotated MP4 in its scenario `videos/`
-directory. Enabling videos while resuming an existing run records only the
-episodes that are actually replayed.
+directory. Enabling videos while resuming a run records only replayed episodes.
 
 ## Per-episode model logs
 
-Use `--logs` (or `--model-logs`) with the task-state-reactive agent to save
-compact, ordered inputs and raw outputs for every TSM and Dispatcher call.
-Parsing errors are included when present:
+Use `--logs` or `--model-logs` with any compatible runtime. Each exchange produces:
 
-```bash
-python -m magma_bench.launch task_state_reactive \
-  --benchmark_root /path/to/magma-benchmark-files \
-  --logs
-```
+- A JSON file with the complete request and response batch, episode, stage,
+  request ID and selected source ID.
+- A Markdown file rendering the selected candidate's ordered `internal_steps`,
+  including prompts, input elements, raw outputs and any response error.
 
-While a scenario is running, logs are written under
-`scenarios/.partial/<scenario>/model_logs/<skeleton>/<semantic>/<condition>/`.
-They move with the scenario directory when it completes.
+Errors are recorded even when no internal step was returned. Internal steps do
+not count as additional benchmark decisions.
 
-The same option supports `history_summary_reactive`. It records a Summarizer
-file only when summarization occurs, followed by the Commander file for that
-turn.
+Logs are written under
+`scenarios/.partial/<scenario>/model_logs/<skeleton>/<semantic>/<condition>/`
+and move with the scenario directory when it completes.
 
-## Commandes
+## Results and migration
 
-| Commande | Fonctionnement |
-|---|---|
-| `magma-bench run` | Évaluer un benchmark |
+Version 2.0.0 uses result schema `2.0`. Runtime identity, version, protocol and
+options must match when resuming a run with `--results-path`. Old result schemas
+and agent adapters are unsupported; start a new result directory. Compiled
+benchmark artifacts keep their existing format.
 
-`magma-bench --help`, `magma-bench <commande> --help` et `magma-bench --version`.
+The CLI accepts an optional `--agent-name` instead of a positional agent family,
+`--agent-address` instead of the old server-address aliases, and a JSON
+`--extra-keys` object instead of arbitrary adapter arguments.
+
+`magma-bench --help`, `magma-bench run --help` and `magma-bench --version` show the
+available commands and package version.

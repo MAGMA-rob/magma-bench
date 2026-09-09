@@ -66,6 +66,7 @@ def _build_fixture():
                         else "compositional"
                     ),
                     condition=condition,
+                    interventions=[object()] if condition == "mission_update" else [],
                     semantic=SimpleNamespace(semantic_id=semantic_id),
                     metadata=SimpleNamespace(
                         control_episode_id=control_id,
@@ -101,7 +102,7 @@ def test_metrics_compute_paired_rates_lengths_and_lags():
     assert metrics.counts.scenario_count == 1
     assert metrics.counts.skeleton_count == 2
     assert metrics.counts.semantic_unit_count == 4
-    assert metrics.counts.episode_count == 24
+    assert metrics.counts.episode_count == 20
     assert metrics.clean_success_rate.value == 0.75
     assert metrics.success_rate_by_condition["mission_update"].value == 0.75
     assert (
@@ -129,7 +130,7 @@ def test_metrics_reject_missing_pairs_and_ambiguous_update_lag():
         if binding[1].episode_id == "skeleton_a.semantic_0.mission_update"
     )
     update.metadata.intervention_lags = [2, 8]
-    with pytest.raises(ValueError, match="exactly one non-null"):
+    with pytest.raises(ValueError, match="one non-null intervention lag per mission update"):
         compute_metrics(bindings, results)
 
 
@@ -244,9 +245,10 @@ def _manager_fixture(tmp_path):
     )
     agent = {
         "agent": "test-agent",
-        "remote_agent": "history_reactive",
-        "prediction_mode": "tool_select",
-        "agent_url": "http://ignored",
+        "agent_id": "test-runtime",
+        "agent_version": "1.0",
+        "protocol_version": "2.0",
+        "extra_keys": {"inference_mode": True},
     }
     return benchmark_root, scenario, agent
 
@@ -277,7 +279,7 @@ def test_result_manager_saves_scenario_and_resumes(tmp_path):
         "in_domain",
         "compositional",
     }
-    assert benchmark_result.metrics.counts.episode_count == 24
+    assert benchmark_result.metrics.counts.episode_count == 20
     assert benchmark_result.status == "complete"
     assert benchmark_result.completed_scenario_count == 1
     assert benchmark_result.partial_scenario_ids == []
@@ -307,65 +309,35 @@ def test_result_manager_saves_ordered_model_logs_with_scenario(tmp_path):
     )
     assert manager.start_scenario(scenario) is True
     manager.start_episode_model_logs(episode.episode_id)
-    manager.record_model_diagnostics(
-        episode.episode_id,
-        2,
-        [
-            {
-                "component": "tsm",
-                "input": {
-                    "instruction": "Move le cube",
-                    "permanent_rules": [],
-                    "rules": [],
-                    "goals": ["[g0] Move the cube"],
-                },
-                "raw_output": "ADD_GOAL(...)",
-                "error": None,
-            },
-            {
-                "component": "dispatcher",
-                "input": {
-                    "permanent_rules": [],
-                    "rules": [],
-                    "goals": ["[g0] Move the cube"],
-                    "attributes": {"known_robots": ["panda"]},
-                    "history": [
-                        '{\"name\": \"pick\"}',
-                        "The cube was picked",
-                    ],
-                },
-                "raw_output": {"tools": []},
-                "error": None,
-            },
-        ],
-    )
+    steps = [
+        {"component": component, "origin": "model", "full_prompt": "Move le cube",
+         "input_elements": {"custom_field": [1, 2]}, "output_raw": f"answer-{index}"}
+        for index, component in enumerate(("first", "second", "arbitrary"))
+    ]
+    for index, internal_steps in enumerate((steps, [])):
+        manager.record_model_diagnostics(episode.episode_id, 2, [{
+            "request": {"request_id": f"request-{index}", "inputs": []},
+            "source_id": 4,
+            "response": [{"source_id": 4, "internal_steps": internal_steps,
+                          "error": None if internal_steps else {"message": "failed"}}],
+        }])
     manager.record_episode(_outcome(episode.episode_id))
     manager.finish_scenario(scenario)
-
-    model_log_path = (
-        results_path
-        / "scenarios"
-        / "scenario_a"
-        / "model_logs"
-        / episode.skeleton_id
-        / episode.semantic.semantic_id
-        / episode.condition
-    )
-    assert [path.name for path in sorted(model_log_path.iterdir())] == [
-        "0000_tsm.txt",
-        "0001_dispatcher.txt",
+    log_path = (results_path / "scenarios" / "scenario_a" / "model_logs"
+                / episode.skeleton_id / episode.semantic.semantic_id / episode.condition)
+    assert sorted(path.name for path in log_path.iterdir()) == [
+        "0000_exchange.json", "0000_exchange.md", "0001_exchange.json", "0001_exchange.md",
     ]
-    tsm_log = (model_log_path / "0000_tsm.txt").read_text(encoding="utf-8")
-    assert "STAGE_INDEX: 2" in tsm_log
-    assert "Move le cube" in tsm_log
-    assert "ADD_GOAL(...)" in tsm_log
-    assert "PARSED OUTPUT" not in tsm_log
-    assert "\nSTATE\n" not in tsm_log
-    dispatcher_log = (
-        model_log_path / "0001_dispatcher.txt"
-    ).read_text(encoding="utf-8")
-    assert "TOOLS\n" not in dispatcher_log
-    assert '{"name": "pick"}\nThe cube was picked' in dispatcher_log
+    record = json.loads((log_path / "0000_exchange.json").read_text())
+    assert record["stage_index"] == 2
+    assert record["episode_id"] == episode.episode_id
+    assert record["request_id"] == "request-0"
+    assert record["response"][0]["internal_steps"] == steps
+    text = (log_path / "0000_exchange.md").read_text()
+    assert text.index("answer-0") < text.index("answer-1") < text.index("answer-2")
+    assert "custom_field" in text
+    assert "Move le cube" in text
+    assert "failed" in (log_path / "0001_exchange.md").read_text()
 
 
 def test_result_manager_replays_partial_and_rejects_incompatible_agent(tmp_path):
@@ -383,7 +355,7 @@ def test_result_manager_replays_partial_and_rejects_incompatible_agent(tmp_path)
     completed_episode_id = scenario.episodes[0].episode_id
     assert (partial_episodes / f"{completed_episode_id}.json").is_file()
     assert completed_episode_id not in resumed.pending_episode_ids("scenario_a")
-    assert len(resumed.pending_episode_ids("scenario_a")) == 23
+    assert len(resumed.pending_episode_ids("scenario_a")) == 19
     assert (resumed.video_directory("scenario_a") / "preserved.mp4").is_file()
 
     incompatible = dict(agent)
@@ -474,3 +446,21 @@ def test_result_manager_rejects_runtime_identity_changes(tmp_path):
             sim_backend="cpu",
             seed=17,
         )
+
+
+@pytest.mark.parametrize("field,value", [("agent_version", "2"), ("extra_keys", {"inference_mode": False})])
+def test_resume_rejects_changed_runtime_configuration(tmp_path, field, value):
+    benchmark_root, scenario, agent = _manager_fixture(tmp_path)
+    ResultManager(tmp_path / "results", benchmark_root, agent, [scenario])
+    with pytest.raises(ValueError, match="incompatible"):
+        ResultManager(tmp_path / "results", benchmark_root, {**agent, field: value}, [scenario])
+
+
+def test_old_result_schema_is_rejected():
+    from pydantic import ValidationError
+    _, results = _build_fixture()
+    payload = next(iter(results.values())).model_dump(mode="json")
+    assert payload["schema_version"] == "2.0"
+    payload["schema_version"] = "1.1"
+    with pytest.raises(ValidationError, match="schema_version"):
+        EpisodeResult.model_validate(payload)

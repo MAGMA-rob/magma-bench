@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ..artifacts.models import Track
 
 
-RESULT_SCHEMA_VERSION = "1.1"
+RESULT_SCHEMA_VERSION = "2.0"
 NON_CLEAN_CONDITIONS = (
     "mission_update",
     "interruption",
@@ -74,7 +74,7 @@ class EpisodeOutcome(ResultModel):
 
 
 class EpisodeResult(EpisodeOutcome):
-    schema_version: Literal["1.1"] = RESULT_SCHEMA_VERSION
+    schema_version: Literal["2.0"] = RESULT_SCHEMA_VERSION
 
 
 class Rate(ResultModel):
@@ -118,7 +118,7 @@ class MetricsPayload(ResultModel):
 
 
 class ScenarioResult(ResultModel):
-    schema_version: Literal["1.1"] = RESULT_SCHEMA_VERSION
+    schema_version: Literal["2.0"] = RESULT_SCHEMA_VERSION
     scenario_id: str
     metrics: MetricsPayload
     metrics_by_track: Dict[Track, MetricsPayload]
@@ -131,7 +131,7 @@ class InfrastructureFailure(ResultModel):
 
 
 class BenchmarkResult(ResultModel):
-    schema_version: Literal["1.1"] = RESULT_SCHEMA_VERSION
+    schema_version: Literal["2.0"] = RESULT_SCHEMA_VERSION
     status: Literal["complete", "partial"] = "complete"
     expected_scenario_count: int = Field(default=0, ge=0)
     completed_scenario_count: int = Field(default=0, ge=0)
@@ -145,8 +145,10 @@ class BenchmarkResult(ResultModel):
 
 class AgentIdentity(ResultModel):
     agent: str
-    remote_agent: str
-    prediction_mode: str
+    agent_id: str
+    agent_version: str
+    protocol_version: str
+    extra_keys: Dict[str, Any]
 
 
 class ExecutionIdentity(ResultModel):
@@ -158,7 +160,7 @@ class ExecutionIdentity(ResultModel):
 
 
 class RunManifest(ResultModel):
-    schema_version: Literal["1.1"] = RESULT_SCHEMA_VERSION
+    schema_version: Literal["2.0"] = RESULT_SCHEMA_VERSION
     benchmark_version: str
     benchmark_fingerprint: str
     agent: AgentIdentity

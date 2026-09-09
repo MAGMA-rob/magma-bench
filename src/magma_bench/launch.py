@@ -1,13 +1,14 @@
-from magma_core.utils.text_utils import auto_cast
 from magma_core.configs import MAGMAConfig
 
 import argparse
+import json
 from typing import Optional
 from pathlib import Path
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("agent", type=str, help="Benchmark agent mode to evaluate.")
+    parser.add_argument("--agent-name", help="Optional execution name; defaults to the runtime identity.")
+    parser.add_argument("--extra-keys", type=json.loads, default={}, help="JSON object of runtime options.")
     parser.add_argument(
         '--benchmark-root', '--benchmark_root',
         type=Path,
@@ -24,7 +25,7 @@ def parse_args():
         '--config-path', '--config_path', "-c",
         type=str,
         default=None,
-        help="Custom config to pass to MAGMA-GEN."
+        help="Benchmark configuration file."
     )
 
     parser.add_argument(
@@ -33,9 +34,9 @@ def parse_args():
         help="Which backend instance to use for the verifier."
     )
     parser.add_argument(
-        '--magma-agent-address', '--magma_agent_address', '-mas',
+        '--agent-address',
         type=str,
-        help="The address of the magma_agent server to use for this generation."
+        help="The address of the protocol-v2 agent server."
     )
     parser.add_argument(
         "-b",
@@ -53,7 +54,7 @@ def parse_args():
         '--deterministic-decoding', '--deterministic_decoding',
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Request greedy inference from magma_agent (default: enabled).",
+        help="Request greedy inference from the agent runtime (default: enabled).",
     )
     parser.add_argument("--seed", type=int, help="The default start seed (default = 42)")
     parser.add_argument(
@@ -69,8 +70,7 @@ def parse_args():
         action=argparse.BooleanOptionalAction,
         default=None,
         help=(
-            "Save ordered per-episode TSM/Dispatcher inputs and outputs "
-            "(TSR agent)."
+            "Save complete agent exchanges and ordered internal steps per episode."
         ),
     )
     parser.add_argument(
@@ -88,34 +88,19 @@ def parse_args():
         action="store_true",
         help="Auto-validate text answers without starting a judge backend.",
     )
-    args, unknown = parser.parse_known_args()
-
-    # Parse extra --key value pairs
-    extra_args = {}
-    i = 0
-    while i < len(unknown):
-        if unknown[i].startswith("--"):
-            key = unknown[i][2:]
-            if i + 1 < len(unknown):
-                value = auto_cast(unknown[i + 1])
-            else:
-                value = True
-            extra_args[key] = value
-            i += 2
-        else:
-            raise ValueError(f"Unexpected argument format: {unknown[i]}")
-
-    args.extra = extra_args
+    args = parser.parse_args()
+    if not isinstance(args.extra_keys, dict):
+        parser.error("--extra-keys must be a JSON object")
     return args
 
 def build_override_dict(args):
     excluded = {
-        "agent",
+        "agent_name",
         "benchmark_root",
         "config_path",
         "scenarios",
         "skip_judge",
-        "extra",
+        "extra_keys",
     }
     overrides = {"benchmark":{}}
 
@@ -124,8 +109,8 @@ def build_override_dict(args):
             continue
         if value is None:
             continue
-        if key == "magma_agent_address":
-            overrides[key] = value
+        if key == "agent_address":
+            overrides["magma_agent_address"] = value
         else:
             overrides["benchmark"][key] = value
 
@@ -165,9 +150,9 @@ def main(args : argparse.Namespace):
     magma_config.override_with_dict(override_dict)
 
     runner = BenchmarkRunner(
-        args.agent, 
         magma_config=magma_config,
-        class_specific_args=args.extra,
+        agent_name=args.agent_name,
+        extra_keys=args.extra_keys,
         skip_judge=args.skip_judge,
     )
     runner.load_benchmark(args.benchmark_root, args.scenarios)

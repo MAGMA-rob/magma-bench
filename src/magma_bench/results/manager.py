@@ -161,11 +161,7 @@ class ResultManager:
         )
         if not isinstance(manifest_model, BenchmarkManifest):
             raise TypeError("Unexpected benchmark manifest model")
-        identity = AgentIdentity.model_validate({
-            "agent": agent_card.get("agent"),
-            "remote_agent": agent_card.get("remote_agent"),
-            "prediction_mode": agent_card.get("prediction_mode"),
-        })
+        identity = AgentIdentity.model_validate(agent_card)
         self.run_manifest = RunManifest(
             benchmark_version=manifest_model.benchmark_version,
             benchmark_fingerprint=benchmark_fingerprint(
@@ -309,7 +305,7 @@ class ResultManager:
         for existing in path.iterdir():
             if (
                 existing.is_file()
-                and existing.suffix == ".txt"
+                and existing.suffix in {".json", ".md"}
                 and existing.name[:4].isdigit()
                 and existing.name[4:5] == "_"
             ):
@@ -334,67 +330,36 @@ class ResultManager:
             )
         counter = self._model_log_counters[episode_id]
         for diagnostic in diagnostics:
-            component = str(diagnostic.get("component", "model"))
-            safe_component = "".join(
-                char if char.isalnum() or char in {"-", "_"} else "_"
-                for char in component
-            ) or "model"
-            body = [
-                f"EPISODE: {episode_id}",
-                f"STAGE_INDEX: {stage_index}",
-                f"CALL_INDEX: {counter}",
-                f"MODEL: {component}",
-            ]
-            model_input = diagnostic.get("input", {})
-            if not isinstance(model_input, dict):
-                model_input = {"input": model_input}
-            for key in (
-                "instruction",
-                "summary",
-                "permanent_rules",
-                "rules",
-                "goals",
-                "attributes",
-                "history",
-            ):
-                if key not in model_input:
-                    continue
-                value = model_input[key]
-                if isinstance(value, list):
-                    rendered = (
-                        "\n".join(str(item) for item in value)
-                        if value
-                        else "(empty)"
-                    )
-                elif isinstance(value, str):
-                    rendered = value
-                else:
-                    rendered = json.dumps(
-                        value,
-                        ensure_ascii=False,
-                        indent=2,
-                        default=str,
-                    )
-                body.extend(("", key.replace("_", " ").upper(), rendered))
-
-            raw_output = diagnostic.get("raw_output")
-            if isinstance(raw_output, str):
-                rendered_output = raw_output
-            else:
-                rendered_output = json.dumps(
-                    raw_output,
-                    ensure_ascii=False,
-                    indent=2,
-                    default=str,
-                )
-            body.extend(("", "OUTPUT", rendered_output))
-
-            error = diagnostic.get("error")
-            if error:
-                body.extend(("", "ERROR", str(error)))
+            request = diagnostic["request"]
+            response = diagnostic["response"]
+            source_id = diagnostic["source_id"]
+            output = next(item for item in response if item["source_id"] == source_id)
+            record = {
+                "episode_id": episode_id, "stage_index": stage_index,
+                "request_id": request["request_id"], "source_id": source_id,
+                "request": request, "response": response,
+            }
             _write_text_atomic(
-                directory / f"{counter:04d}_{safe_component}.txt",
-                "\n".join(body) + "\n",
+                directory / f"{counter:04d}_exchange.json",
+                json.dumps(record, ensure_ascii=False, indent=2) + "\n",
+            )
+            body = [
+                f"EPISODE: {episode_id}", f"STAGE_INDEX: {stage_index}",
+                f"REQUEST_ID: {request['request_id']}", f"SOURCE_ID: {source_id}",
+            ]
+            for index, step in enumerate(output["internal_steps"]):
+                body.extend(("", f"## Step {index}"))
+                for key, value in step.items():
+                    rendered = value if isinstance(value, str) else json.dumps(
+                        value, ensure_ascii=False, indent=2,
+                    )
+                    body.extend(("", f"### {key}", "", rendered))
+            if output["error"] is not None:
+                body.extend(("", "## Error", "", json.dumps(
+                    output["error"], ensure_ascii=False, indent=2,
+                )))
+            _write_text_atomic(
+                directory / f"{counter:04d}_exchange.md", "\n".join(body) + "\n",
             )
             counter += 1
         self._model_log_counters[episode_id] = counter

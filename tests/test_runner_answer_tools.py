@@ -503,6 +503,7 @@ def _judge_executor(responses):
             get_stage_rule=lambda _stage_id: "rule",
             get_stage_input=lambda _stage_id: stage_input,
         ),
+        tool_context=None,
         judge_pending=False,
         judge_attempt_count=0,
         get_answer=lambda: answer,
@@ -601,9 +602,10 @@ def test_planner_terminal_retry_keeps_a_runtime_event():
     )
     context = SimpleNamespace(
         episode=SimpleNamespace(episode_id="episode_0"),
-        planner_retry_count=10,
+        planner_retry_count=ToolsEvalExecutor.MAX_PLANNER_RETRIES,
         saved_data=SimpleNamespace(
             stage_id=2,
+            env_state={},
             attributes={},
             tool_calls=3,
             forgiven_tool_calls=0,
@@ -622,8 +624,8 @@ def test_planner_terminal_retry_keeps_a_runtime_event():
         PlannerRetryEvent(
             env_idx=0,
             episode_id="episode_0",
-            attempt=10,
-            max_attempts=10,
+            attempt=ToolsEvalExecutor.MAX_PLANNER_RETRIES,
+            max_attempts=ToolsEvalExecutor.MAX_PLANNER_RETRIES,
             message="planner blocked by collision",
         )
     ]
