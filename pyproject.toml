@@ -9,7 +9,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "magma_core[simulation]>=2.0.0,<3.0.0",
-    "magma_scenarios>=1.0.0,<2.0.0",
+    "magma_scenarios>=2.0.0,<3.0.0",
     "pydantic>=2.0",
 ]
 

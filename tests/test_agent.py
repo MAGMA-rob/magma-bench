@@ -152,7 +152,7 @@ import sys
 import importlib.abc
 class BlockAgentImports(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.split('.')[0] in {'tsr_agent', 'full_history_agent'} or fullname.startswith('magma_core.tsr_engine'):
+        if fullname.split('.')[0].endswith('_agent'):
             raise ImportError(fullname)
 sys.meta_path.insert(0, BlockAgentImports())
 from types import SimpleNamespace
