@@ -4,7 +4,7 @@ Evaluate agents on interactive robotic tasks with MAGMA. MAGMA-BENCH loads
 compiled benchmark episodes, runs them in simulation, communicates with an agent
 through the MAGMA HTTP protocol, and saves detailed results and metrics.
 
-**Version 2.0.0b1 is the first beta of v2.** APIs, command-line options, and
+**Version 2.0.0b2 is a beta of v2.** APIs, command-line options, and
 result formats may change before the stable release. End-to-end validation is
 still in progress.
 
@@ -17,7 +17,7 @@ Python 3.12 is required. Simulation installation has been checked on Linux
 x86_64. GPU simulation and rendering require compatible system drivers.
 
 ```bash
-python -m pip install "magma_bench==2.0.0b1"
+python -m pip install "magma_bench==2.0.0b2"
 ```
 
 This installs `magma_core[simulation]>=2.0.0b1,<3.0.0` and
@@ -59,7 +59,7 @@ magma-bench run --benchmark-root /path/to/benchmark --model-logs --videos
 Video output uses the optional dependencies:
 
 ```bash
-python -m pip install "magma_bench[video]==2.0.0b1"
+python -m pip install "magma_bench[video]==2.0.0b2"
 ```
 
 Version 2 uses result schema `2.0`. Resume a compatible run with
@@ -73,7 +73,7 @@ benchmark preparation, configuration, agent setup, metrics, and result formats.
 Install the tagged release from GitHub:
 
 ```bash
-python -m pip install "magma_bench @ git+https://github.com/MAGMA-rob/magma-bench.git@v2.0.0b1"
+python -m pip install "magma_bench @ git+https://github.com/MAGMA-rob/magma-bench.git@v2.0.0b2"
 ```
 
 Dependencies are resolved from PyPI. For local development, clone the repository
