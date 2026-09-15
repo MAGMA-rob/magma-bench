@@ -31,11 +31,17 @@ class BenchmarkRunner:
         self,
         magma_config: MAGMAConfig,
         extra_keys: JsonObject | None = None,
-        agent_name: str | None = None,
+        run_name: str | None = None,
         skip_judge: bool = False,
     ) -> None:
         benchmark_config = magma_config.benchmark
         self._skip_judge = skip_judge
+        agent_timeout = float(benchmark_config.get("agent_timeout", 360))
+        if agent_timeout <= 0:
+            raise ValueError("benchmark.agent_timeout must be strictly positive")
+        nb_env = int(benchmark_config.get("nb_env", 1))
+        if nb_env <= 0:
+            raise ValueError("benchmark.nb_env must be strictly positive")
         if benchmark_config.get("shader", "default") != "default":
             raise NotImplementedError(
                 "Non-default benchmark shaders are not supported by magma_bench."
@@ -78,15 +84,21 @@ class BenchmarkRunner:
         if skip_judge:
             worker = None
         else:
-            verifier_backend = magma_config.backends[
-                benchmark_config["backend_verifier"]
-            ]
+            backend_name = benchmark_config.get("backend_verifier")
+            if not isinstance(backend_name, str) or backend_name not in magma_config.backends:
+                available = ", ".join(sorted(magma_config.backends)) or "none"
+                raise ValueError(
+                    "No valid verifier backend is configured. Use --verifier-backend "
+                    f"with one of [{available}], or use --skip-judge."
+                )
+            verifier_backend = magma_config.backends[backend_name]
             worker = LMWorker(verifier_backend)
 
         self.agent = BenchmarkAgent(
             agent_url=magma_config.magma_agent_address,
-            agent_name=agent_name,
+            agent_name=run_name,
             extra_keys=runtime_options,
+            timeout=agent_timeout,
             collect_model_logs=self._model_logs,
         )
         self._scenarios: List[Scenario] = []
@@ -103,7 +115,7 @@ class BenchmarkRunner:
         self.tool_executor = ToolsEvalExecutor(
             magma_config.magma_planner_address,
             worker,
-            nb_env=int(benchmark_config.get("nb_env", 1)),
+            nb_env=nb_env,
             skip_judge=skip_judge,
             visual_assets=self.video_recorder.config.enabled,
         )

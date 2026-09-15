@@ -3,15 +3,23 @@
 
 [project]
 name = "magma_bench"
-version = "2.0.0"
-description = "Benchmark code to execute and evaluate your model on the MAGMA-BENCHMARK"
+version = "2.0.0b1"
+description = "Evaluate agents on interactive robotic tasks with MAGMA"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.12,<3.13"
+classifiers = ["Development Status :: 4 - Beta"]
 dependencies = [
-    "magma_core[simulation]>=2.0.0,<3.0.0",
+    "magma_core[simulation]>=2.0.0b1,<3.0.0",
     "magma_scenarios>=2.0.0,<3.0.0",
-    "pydantic>=2.0",
+    "pydantic>=2.4,<3",
+    "requests>=2.34.2,<3",
+    "torch==2.13.0",
 ]
+
+[project.urls]
+Documentation = "https://magma-rob.github.io/docs/intro"
+Repository = "https://github.com/MAGMA-rob/magma-bench"
+Issues = "https://github.com/MAGMA-rob/magma-bench/issues"
 
 [project.optional-dependencies]
 dev = ["pytest"]
@@ -25,5 +33,12 @@ video = [
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
+[tool.setuptools.packages.find]
+where = ["src"]
+
 [project.scripts]
 magma-bench = "magma_bench.command_line:main"
+
+[tool.pytest.ini_options]
+addopts = "-p no:launch_testing -p no:launch_ros"
+testpaths = ["tests"]

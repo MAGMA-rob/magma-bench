@@ -211,19 +211,42 @@ def test_startup_rejects_unready_or_incompatible_server(monkeypatch, payload):
 def test_cli_uses_generic_options(monkeypatch):
     from magma_bench.launch import build_override_dict, parse_args
     monkeypatch.setattr(sys, "argv", [
-        "magma-bench", "--agent-address", "http://example", "--agent-name", "experiment",
+        "magma-bench", "--benchmark-root", "/tmp/benchmark",
+        "--agent-address", "http://example", "--run-name", "experiment",
+        "--planner-address", "http://planner", "--verifier-backend", "judge",
+        "--agent-timeout", "120", "--nb-env", "4",
         "--extra-keys", '{"inference_mode": false}', "--no-deterministic-decoding",
     ])
     args = parse_args()
-    assert args.agent_name == "experiment"
+    assert args.run_name == "experiment"
+    assert args.planner_address == "http://planner"
     assert args.extra_keys == {"inference_mode": False}
     assert build_override_dict(args) == {
         "magma_agent_address": "http://example",
-        "benchmark": {"deterministic_decoding": False},
+        "benchmark": {
+            "agent_timeout": 120,
+            "backend_verifier": "judge",
+            "deterministic_decoding": False,
+            "nb_env": 4,
+        },
     }
-    monkeypatch.setattr(sys, "argv", ["magma-bench", "--unknown-adapter-option", "x"])
+    monkeypatch.setattr(sys, "argv", [
+        "magma-bench", "--benchmark-root", "/tmp/benchmark",
+        "--unknown-adapter-option", "x",
+    ])
     with pytest.raises(SystemExit):
         parse_args()
+
+    for invalid_args in (
+        [],
+        ["--benchmark-root", "/tmp/benchmark", "--save-dir", "a", "--results-path", "b"],
+        ["--benchmark-root", "/tmp/benchmark", "--skip-judge", "--verifier-backend", "judge"],
+        ["--benchmark-root", "/tmp/benchmark", "--agent-timeout", "0"],
+        ["--benchmark-root", "/tmp/benchmark", "--nb-env", "0"],
+    ):
+        monkeypatch.setattr(sys, "argv", ["magma-bench", *invalid_args])
+        with pytest.raises(SystemExit):
+            parse_args()
 
 
 def test_conflicting_decoding_options_rejected_before_startup():
@@ -231,6 +254,18 @@ def test_conflicting_decoding_options_rejected_before_startup():
     config = SimpleNamespace(benchmark={"deterministic_decoding": True})
     with pytest.raises(ValueError, match="conflicts"):
         BenchmarkRunner(config, extra_keys={"inference_mode": False}, skip_judge=True)
+
+
+def test_missing_verifier_backend_is_reported_before_agent_startup():
+    from magma_bench.runner.runner import BenchmarkRunner
+    config = SimpleNamespace(
+        benchmark={},
+        backends={},
+        magma_agent_address="http://example",
+        magma_planner_address="http://planner",
+    )
+    with pytest.raises(ValueError, match="--verifier-backend.*--skip-judge"):
+        BenchmarkRunner(config)
 
 
 def test_disabled_logs_do_not_collect_exchanges(agent, monkeypatch):

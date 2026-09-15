@@ -6,13 +6,21 @@ from typing import Optional
 from pathlib import Path
 
 def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--agent-name", help="Optional execution name; defaults to the runtime identity.")
-    parser.add_argument("--extra-keys", type=json.loads, default={}, help="JSON object of runtime options.")
+    parser = argparse.ArgumentParser(description="Evaluate a compiled MAGMA benchmark.")
     parser.add_argument(
-        '--benchmark-root', '--benchmark_root',
+        "--run-name",
+        help="Result directory name; defaults to the agent runtime identity.",
+    )
+    parser.add_argument(
+        "--extra-keys",
+        type=json.loads,
+        default={},
+        help="JSON object of advanced options passed to every agent request.",
+    )
+    parser.add_argument(
+        '--benchmark-root',
         type=Path,
-        default=None,
+        required=True,
         help="Directory produced by magma-bench-generator build.",
     )
     
@@ -22,14 +30,14 @@ def parse_args():
         help="One or more scenario IDs or names; all their episodes are run.",
     )
     parser.add_argument(
-        '--config-path', '--config_path', "-c",
-        type=str,
-        default=None,
+        '--config-path',
+        type=Path,
         help="Benchmark configuration file."
     )
 
     parser.add_argument(
-        '--verifier-backend', '--verifier_backend', '-vb',
+        '--verifier-backend',
+        dest="backend_verifier",
         type=str,
         help="Which backend instance to use for the verifier."
     )
@@ -39,19 +47,37 @@ def parse_args():
         help="The address of the protocol-v2 agent server."
     )
     parser.add_argument(
-        "-b",
-        '--sim-backend', "--sim_backend",
+        '--planner-address',
+        help="Address of the MAGMA motion planner server.",
+    )
+    parser.add_argument(
+        '--agent-timeout',
+        type=float,
+        help="Agent HTTP timeout in seconds (default: 360).",
+    )
+    parser.add_argument(
+        '--nb-env',
+        type=int,
+        help="Maximum number of parallel simulation environments.",
+    )
+    parser.add_argument(
+        '--sim-backend',
         choices=("auto", "cpu", "gpu"),
         help="Simulation backend.",
     )
-    parser.add_argument('--save-dir', '--save_dir', type=str, help="where to save videos, log, result of the benchmark")
-    parser.add_argument(
-        '--results-path', '--results_path',
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument(
+        '--save-dir',
+        type=Path,
+        help="Root directory for a new timestamped benchmark run.",
+    )
+    output.add_argument(
+        '--results-path',
         type=Path,
         help="Exact result directory to create or resume.",
     )
     parser.add_argument(
-        '--deterministic-decoding', '--deterministic_decoding',
+        '--deterministic-decoding',
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Request greedy inference from the agent runtime (default: enabled).",
@@ -65,7 +91,6 @@ def parse_args():
     )
     parser.add_argument(
         "--model-logs",
-        "--logs",
         dest="model_logs",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -74,33 +99,40 @@ def parse_args():
         ),
     )
     parser.add_argument(
-        '--video-fps', '--video_fps',
+        '--video-fps',
         type=int,
         help="Annotated video frame rate (default: 20).",
     )
     parser.add_argument(
-        '--video-hold-seconds', '--video_hold_seconds',
+        '--video-hold-seconds',
         type=float,
         help="Duration of non-physical video events (default: 1 second).",
     )
     parser.add_argument(
-        '--skip-judge', '--skip_judge',
+        '--skip-judge',
         action="store_true",
         help="Auto-validate text answers without starting a judge backend.",
     )
     args = parser.parse_args()
     if not isinstance(args.extra_keys, dict):
         parser.error("--extra-keys must be a JSON object")
+    if args.agent_timeout is not None and args.agent_timeout <= 0:
+        parser.error("--agent-timeout must be strictly positive")
+    if args.nb_env is not None and args.nb_env <= 0:
+        parser.error("--nb-env must be strictly positive")
+    if args.skip_judge and args.backend_verifier is not None:
+        parser.error("--verifier-backend cannot be combined with --skip-judge")
     return args
 
 def build_override_dict(args):
     excluded = {
-        "agent_name",
+        "run_name",
         "benchmark_root",
         "config_path",
         "scenarios",
         "skip_judge",
         "extra_keys",
+        "planner_address",
     }
     overrides = {"benchmark":{}}
 
@@ -116,7 +148,7 @@ def build_override_dict(args):
 
     return overrides
 
-def resolve_config_path(path: Optional[str]) -> Optional[Path]:
+def resolve_config_path(path: Optional[Path]) -> Optional[Path]:
     """
     Resolve config file with precedence:
     1. CLI path
@@ -125,10 +157,9 @@ def resolve_config_path(path: Optional[str]) -> Optional[Path]:
     """
 
     if path:
-        cli_path = Path(path)
-        if cli_path.exists():
-            return cli_path
-        raise TypeError(f"Impossible to find the config at path: {path}")
+        if path.is_file():
+            return path
+        raise FileNotFoundError(f"Configuration file does not exist: {path}")
 
     cwd_config = Path.cwd() / "config.yaml"
     if cwd_config.exists():
@@ -148,10 +179,19 @@ def main(args : argparse.Namespace):
         accept_no_backend=args.skip_judge,
     )
     magma_config.override_with_dict(override_dict)
+    if args.planner_address is not None:
+        magma_config.magma_planner_address = args.planner_address
+    if not bool(magma_config.benchmark.get("videos", False)) and (
+        args.video_fps is not None or args.video_hold_seconds is not None
+    ):
+        raise ValueError(
+            "--video-fps and --video-hold-seconds require --videos or "
+            "benchmark.videos: true in the configuration."
+        )
 
     runner = BenchmarkRunner(
         magma_config=magma_config,
-        agent_name=args.agent_name,
+        run_name=args.run_name,
         extra_keys=args.extra_keys,
         skip_judge=args.skip_judge,
     )

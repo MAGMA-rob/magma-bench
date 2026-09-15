@@ -34,10 +34,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         sys.argv = [f"{parser.prog} {options.command}", *options.arguments]
         module = import_module(module_name)
-        if mode == "args":
-            result = module.main(module.parse_args())
-        else:
-            result = module.main()
+        try:
+            if mode == "args":
+                result = module.main(module.parse_args())
+            else:
+                result = module.main()
+        except (FileNotFoundError, KeyError, TypeError, ValueError) as error:
+            parser.error(str(error))
         return 0 if result is None else result
     finally:
         sys.argv = previous_argv
