@@ -82,8 +82,6 @@ class BenchmarkAgent:
             ))
         request = AgentRequest(request_id=uuid4().hex, inputs=inputs)
         response = self.send_to_agent(request)
-        wire_request = request.model_dump(mode="json") if self.collect_model_logs else None
-        wire_response = response.model_dump(mode="json") if self.collect_model_logs else None
         results: list[BenchmarkAgentResult] = []
         for output in response.root:
             updated = batch_inputs[output.source_id].snapshot()
@@ -91,9 +89,12 @@ class BenchmarkAgent:
             diagnostics: list[dict[str, Any]] = []
             if self.collect_model_logs:
                 diagnostics.append({
-                    "request": wire_request,
-                    "response": wire_response,
-                    "source_id": output.source_id,
+                    "internal_steps": deepcopy(output.internal_steps),
+                    "error": (
+                        output.error.model_dump(mode="json")
+                        if output.error is not None
+                        else None
+                    ),
                 })
             results.append(BenchmarkAgentResult(
                 answer=self.normalize_model_response(output),

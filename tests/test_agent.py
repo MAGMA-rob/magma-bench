@@ -47,7 +47,7 @@ def install_response(monkeypatch, transform=None):
         outputs = [{
             "request_id": request.request_id, "source_id": entry.id, "candidate_index": 0,
             "status": "completed", "memory": {"private": [entry.id]},
-            "internal_steps": [{"component": "arbitrary", "output_raw": "raw"}],
+            "internal_steps": [{"component": "arbitrary", "output_raw": f"raw-{entry.id}"}],
             "output": {"say": "done", "tool_calls": []}, "error": None,
         } for entry in request.inputs]
         if transform is not None:
@@ -67,8 +67,11 @@ def test_batch_memory_and_full_feedback(agent, monkeypatch):
     assert captured[0]["inputs"][1]["instruction"]["content"] == feedback.get_content()
     assert results[0].situation.memory == {"private": [7]}
     assert original[7].memory == {"history": []}
-    assert results[0].model_diagnostics[0]["request"] == captured[0]
-    assert len(results[0].model_diagnostics[0]["response"]) == 2
+    assert results[0].model_diagnostics == [{
+        "internal_steps": [{"component": "arbitrary", "output_raw": "raw-7"}],
+        "error": None,
+    }]
+    assert "raw-3" not in str(results[0].model_diagnostics)
     agent.compute_agent_results({7: results[0].situation})
     assert captured[1]["inputs"][0]["memory"] == {"private": [7]}
     assert captured[1]["request_id"] != captured[0]["request_id"]
@@ -108,7 +111,14 @@ def test_candidate_error_keeps_memory_and_logs(agent, monkeypatch):
     assert not result.answer.is_valid()
     assert result.answer.reason == "bad output"
     assert result.situation.memory == {"private": [0]}
-    assert result.model_diagnostics[0]["response"][0]["error"]["message"] == "bad output"
+    assert result.model_diagnostics == [{
+        "internal_steps": [],
+        "error": {
+            "code": "invalid_output",
+            "message": "bad output",
+            "component": None,
+        },
+    }]
 
 
 @pytest.mark.parametrize("change", ["request", "source", "candidate", "missing", "duplicate", "order", "decision"])

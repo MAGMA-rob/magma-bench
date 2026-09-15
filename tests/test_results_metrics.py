@@ -253,14 +253,15 @@ def _manager_fixture(tmp_path):
     return benchmark_root, scenario, agent
 
 
-def _outcome(episode_id, success=True, status=None):
+def _outcome(episode_id, success=True, status=None, reason=None, trace=None):
     return EpisodeOutcome(
         episode_id=episode_id,
         success=success,
         terminal=EpisodeTerminal(
-            status=status or ("success" if success else "stage_failure")
+            status=status or ("success" if success else "stage_failure"),
+            reason=reason,
         ),
-        trace=[],
+        trace=[] if trace is None else trace,
     )
 
 
@@ -309,6 +310,14 @@ def test_result_manager_saves_ordered_model_logs_with_scenario(tmp_path):
     )
     assert manager.start_scenario(scenario) is True
     manager.start_episode_model_logs(episode.episode_id)
+    partial_log_path = (
+        results_path / "scenarios" / ".partial" / "scenario_a" / "model_logs"
+        / episode.skeleton_id / episode.semantic.semantic_id / episode.condition
+    )
+    (partial_log_path / "0000_exchange.json").write_text("legacy")
+    (partial_log_path / "final.md").write_text("stale")
+    manager.start_episode_model_logs(episode.episode_id)
+    assert list(partial_log_path.iterdir()) == []
     steps = [
         {"component": component, "origin": "model", "full_prompt": "Move le cube",
          "input_elements": {"custom_field": [1, 2]}, "output_raw": f"answer-{index}"}
@@ -316,28 +325,182 @@ def test_result_manager_saves_ordered_model_logs_with_scenario(tmp_path):
     ]
     for index, internal_steps in enumerate((steps, [])):
         manager.record_model_diagnostics(episode.episode_id, 2, [{
-            "request": {"request_id": f"request-{index}", "inputs": []},
-            "source_id": 4,
-            "response": [{"source_id": 4, "internal_steps": internal_steps,
-                          "error": None if internal_steps else {"message": "failed"}}],
+            "internal_steps": internal_steps,
+            "error": None if internal_steps else {"message": "failed"},
         }])
-    manager.record_episode(_outcome(episode.episode_id))
+    manager.record_episode(_outcome(
+        episode.episode_id,
+        success=False,
+        status="stage_failure",
+        reason="verification failed",
+        trace=[TraceEvent(
+            index=0,
+            stage_index=2,
+            kind="failure_diagnostics",
+            payload={
+                "source": "stage_verification",
+                "stage_id": 2,
+                "stage_goal_description": "Move the cube",
+                "env_score": 1,
+                "log_score": -1,
+                "combined_score": -1,
+                "tool_results": [{"success": True}],
+                "goal_scores": [],
+                "stage_logs": [{"function": "move", "content": "wrong"}],
+                "full_logs": [{"function": "move", "content": "wrong"}],
+            },
+        )],
+    ))
     manager.finish_scenario(scenario)
     log_path = (results_path / "scenarios" / "scenario_a" / "model_logs"
                 / episode.skeleton_id / episode.semantic.semantic_id / episode.condition)
     assert sorted(path.name for path in log_path.iterdir()) == [
-        "0000_exchange.json", "0000_exchange.md", "0001_exchange.json", "0001_exchange.md",
+        "0000_exchange.md", "0001_exchange.md", "final.md",
     ]
-    record = json.loads((log_path / "0000_exchange.json").read_text())
-    assert record["stage_index"] == 2
-    assert record["episode_id"] == episode.episode_id
-    assert record["request_id"] == "request-0"
-    assert record["response"][0]["internal_steps"] == steps
     text = (log_path / "0000_exchange.md").read_text()
     assert text.index("answer-0") < text.index("answer-1") < text.index("answer-2")
-    assert "custom_field" in text
+    assert "custom_field" not in text
+    assert "input_elements" not in text
+    assert episode.episode_id not in text
+    assert "request_id" not in text
     assert "Move le cube" in text
     assert "failed" in (log_path / "0001_exchange.md").read_text()
+    final = (log_path / "final.md").read_text()
+    assert "stage_failure" in final
+    assert "verification failed" in final
+    assert "Failure source: `logs`" in final
+    assert "Move the cube" in final
+    assert '\"function\": \"move\"' in final
+
+
+def test_result_manager_writes_available_terminal_diagnostics(tmp_path):
+    benchmark_root, full_scenario, agent = _manager_fixture(tmp_path)
+    episodes = full_scenario.episodes[:6]
+    scenario = SimpleNamespace(
+        scenario_id=full_scenario.scenario_id,
+        episodes=episodes,
+    )
+    results_path = tmp_path / "results"
+    manager = ResultManager(
+        results_path,
+        benchmark_root,
+        agent,
+        [scenario],
+        model_logs=True,
+    )
+    assert manager.start_scenario(scenario) is True
+
+    cases = [
+        (
+            episodes[0],
+            _outcome(episodes[0].episode_id),
+            ("`success`",),
+        ),
+        (
+            episodes[1],
+            _outcome(
+                episodes[1].episode_id,
+                success=False,
+                status="stage_failure",
+                reason="judge rejected the answer",
+                trace=[TraceEvent(
+                    index=0,
+                    stage_index=3,
+                    kind="failure_diagnostics",
+                    payload={
+                        "source": "judge",
+                        "question": "Is it done?",
+                        "verification_prompt": "Accept only complete answers",
+                        "model_answer": "Maybe",
+                        "judge_response": '{"verdict": false}',
+                        "judge_verdict": False,
+                        "judge_reason": "Incomplete answer",
+                    },
+                )],
+            ),
+            ("## Judge", "Incomplete answer", "Accept only complete answers"),
+        ),
+        (
+            episodes[2],
+            _outcome(
+                episodes[2].episode_id,
+                success=False,
+                status="stage_failure",
+                reason="environment mismatch",
+                trace=[TraceEvent(
+                    index=0,
+                    stage_index=4,
+                    kind="failure_diagnostics",
+                    payload={
+                        "source": "stage_verification",
+                        "stage_goal_description": "Put the object in the tray",
+                        "env_score": -1,
+                        "log_score": 1,
+                        "combined_score": -1,
+                        "tool_results": [],
+                        "goal_scores": [{"name": "object in tray", "score": 0}],
+                        "stage_logs": [],
+                        "full_logs": [],
+                    },
+                )],
+            ),
+            ("Failure source: `environment`", "object in tray"),
+        ),
+        (
+            episodes[3],
+            _outcome(
+                episodes[3].episode_id,
+                success=False,
+                status="budget_exceeded",
+                reason="The stage tool-call budget was exceeded.",
+                trace=[TraceEvent(
+                    index=0,
+                    stage_index=5,
+                    kind="agent_answer",
+                    payload={"valid": True, "say": "", "action": {}},
+                )],
+            ),
+            ("`budget_exceeded`", "Stage: `5`", "tool-call budget"),
+        ),
+        (
+            episodes[4],
+            _outcome(
+                episodes[4].episode_id,
+                success=False,
+                status="protocol_failure",
+                reason="The stage requires an action.",
+                trace=[TraceEvent(
+                    index=0,
+                    stage_index=6,
+                    kind="agent_answer",
+                    payload={"valid": True, "say": "Done", "action": {}},
+                )],
+            ),
+            ("`protocol_failure`", "Stage: `6`", "requires an action"),
+        ),
+        (
+            episodes[5],
+            _outcome(
+                episodes[5].episode_id,
+                success=False,
+                status="infrastructure_failure",
+                reason="judge backend unavailable",
+            ),
+            ("`infrastructure_failure`", "judge backend unavailable"),
+        ),
+    ]
+
+    for episode, outcome, expected_fragments in cases:
+        manager.start_episode_model_logs(episode.episode_id)
+        manager.record_episode(outcome)
+        final_path = (
+            results_path / "scenarios" / ".partial" / "scenario_a" / "model_logs"
+            / episode.skeleton_id / episode.semantic.semantic_id
+            / episode.condition / "final.md"
+        )
+        text = final_path.read_text()
+        for fragment in expected_fragments:
+            assert fragment in text
 
 
 def test_result_manager_replays_partial_and_rejects_incompatible_agent(tmp_path):

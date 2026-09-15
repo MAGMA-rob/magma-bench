@@ -13,6 +13,8 @@ from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 
+from magma_scenarios import register_environment
+
 from magma_core.simulation.data_structures import (
     EnvToolContext,
     RobotToolStatus,
@@ -120,6 +122,7 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
             self._fatal_error = None
             self._planner_runtime_events.clear()
 
+        register_environment(scenario.environment_id)
         self.env = self._create_envs(
             scenario.environment_id,
             group.env_options,

@@ -50,13 +50,14 @@ directory. Enabling videos while resuming a run records only replayed episodes.
 
 Use `--logs` or `--model-logs` with any compatible runtime. Each exchange produces:
 
-- A JSON file with the complete request and response batch, episode, stage,
-  request ID and selected source ID.
-- A Markdown file rendering the selected candidate's ordered `internal_steps`,
-  including prompts, input elements, raw outputs and any response error.
+- A Markdown file for that episode only, rendering every ordered
+  `internal_step` with its component, complete prompt and raw model output.
+- A response error section when the model runtime or parser rejects the output.
 
-Errors are recorded even when no internal step was returned. Internal steps do
-not count as additional benchmark decisions.
+When the episode ends, `final.md` records its terminal status and the failure
+details already available to the benchmark, such as judge reasoning, stage
+verification scores and actual execution logs. Internal steps do not count as
+additional benchmark decisions.
 
 Logs are written under
 `scenarios/.partial/<scenario>/model_logs/<skeleton>/<semantic>/<condition>/`

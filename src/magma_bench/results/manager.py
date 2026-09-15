@@ -305,9 +305,14 @@ class ResultManager:
         for existing in path.iterdir():
             if (
                 existing.is_file()
-                and existing.suffix in {".json", ".md"}
-                and existing.name[:4].isdigit()
-                and existing.name[4:5] == "_"
+                and (
+                    existing.name == "final.md"
+                    or (
+                        existing.suffix in {".json", ".md"}
+                        and existing.name[:4].isdigit()
+                        and existing.name[4:5] == "_"
+                    )
+                )
             ):
                 existing.unlink()
         self._model_log_directories[episode_id] = path
@@ -330,33 +335,17 @@ class ResultManager:
             )
         counter = self._model_log_counters[episode_id]
         for diagnostic in diagnostics:
-            request = diagnostic["request"]
-            response = diagnostic["response"]
-            source_id = diagnostic["source_id"]
-            output = next(item for item in response if item["source_id"] == source_id)
-            record = {
-                "episode_id": episode_id, "stage_index": stage_index,
-                "request_id": request["request_id"], "source_id": source_id,
-                "request": request, "response": response,
-            }
-            _write_text_atomic(
-                directory / f"{counter:04d}_exchange.json",
-                json.dumps(record, ensure_ascii=False, indent=2) + "\n",
-            )
-            body = [
-                f"EPISODE: {episode_id}", f"STAGE_INDEX: {stage_index}",
-                f"REQUEST_ID: {request['request_id']}", f"SOURCE_ID: {source_id}",
-            ]
-            for index, step in enumerate(output["internal_steps"]):
-                body.extend(("", f"## Step {index}"))
-                for key, value in step.items():
-                    rendered = value if isinstance(value, str) else json.dumps(
-                        value, ensure_ascii=False, indent=2,
-                    )
-                    body.extend(("", f"### {key}", "", rendered))
-            if output["error"] is not None:
+            body = [f"# Stage {stage_index}"]
+            for index, step in enumerate(diagnostic["internal_steps"]):
+                component = step.get("component", "unknown")
+                body.extend(("", f"## Step {index}", "", f"Component: `{component}`"))
+                if "full_prompt" in step:
+                    body.extend(("", "### Prompt", "", str(step["full_prompt"])))
+                if "output_raw" in step:
+                    body.extend(("", "### Response", "", str(step["output_raw"])))
+            if diagnostic["error"] is not None:
                 body.extend(("", "## Error", "", json.dumps(
-                    output["error"], ensure_ascii=False, indent=2,
+                    diagnostic["error"], ensure_ascii=False, indent=2,
                 )))
             _write_text_atomic(
                 directory / f"{counter:04d}_exchange.md", "\n".join(body) + "\n",
@@ -399,6 +388,83 @@ class ResultManager:
                 raise ValueError(
                     f"Episode {outcome.episode_id!r} was completed more than once"
                 )
+
+        if self.model_logs:
+            directory = self._model_log_directories.get(outcome.episode_id)
+            if directory is None:
+                raise RuntimeError(
+                    f"Model logs were not initialized for episode {outcome.episode_id!r}"
+                )
+            diagnostic_events = [
+                event for event in outcome.trace
+                if event.kind == "failure_diagnostics"
+            ]
+            stage_index = (
+                diagnostic_events[-1].stage_index
+                if diagnostic_events
+                else (outcome.trace[-1].stage_index if outcome.trace else None)
+            )
+            body = ["# Result", "", f"- Status: `{outcome.terminal.status}`"]
+            if stage_index is not None:
+                body.append(f"- Stage: `{stage_index}`")
+            if outcome.terminal.reason:
+                body.append(f"- Reason: {outcome.terminal.reason}")
+
+            for event in diagnostic_events:
+                diagnostic = event.payload
+                source = diagnostic.get("source", "unknown")
+                if source == "stage_verification":
+                    env_score = diagnostic.get("env_score")
+                    log_score = diagnostic.get("log_score")
+                    failed_sources = []
+                    if isinstance(env_score, (int, float)) and env_score < 0:
+                        failed_sources.append("environment")
+                    if isinstance(log_score, (int, float)) and log_score < 0:
+                        failed_sources.append("logs")
+                    failure_source = " and ".join(failed_sources) or "combined verification"
+                    body.extend((
+                        "", "## Stage verification", "",
+                        f"- Failure source: `{failure_source}`",
+                        f"- Environment score: `{env_score}`",
+                        f"- Log score: `{log_score}`",
+                        f"- Combined score: `{diagnostic.get('combined_score')}`",
+                    ))
+                    if diagnostic.get("stage_goal_description"):
+                        body.extend((
+                            "", "### Stage goal", "",
+                            str(diagnostic["stage_goal_description"]),
+                        ))
+                    for title, key in (
+                        ("Tool results", "tool_results"),
+                        ("Goal scores", "goal_scores"),
+                        ("Stage logs", "stage_logs"),
+                        ("Full logs", "full_logs"),
+                    ):
+                        if diagnostic.get(key):
+                            body.extend((
+                                "", f"### {title}", "", "```json",
+                                json.dumps(diagnostic[key], ensure_ascii=False, indent=2),
+                                "```",
+                            ))
+                elif source == "judge":
+                    body.extend(("", "## Judge"))
+                    for title, key in (
+                        ("Question", "question"),
+                        ("Verification prompt", "verification_prompt"),
+                        ("Model answer", "model_answer"),
+                        ("Verdict", "judge_verdict"),
+                        ("Reason", "judge_reason"),
+                        ("Raw response", "judge_response"),
+                    ):
+                        if key in diagnostic and diagnostic[key] is not None:
+                            body.extend(("", f"### {title}", "", str(diagnostic[key])))
+                else:
+                    body.extend((
+                        "", f"## Diagnostic: {source}", "", "```json",
+                        json.dumps(diagnostic, ensure_ascii=False, indent=2), "```",
+                    ))
+            _write_text_atomic(directory / "final.md", "\n".join(body) + "\n")
+
         _write_model_atomic(path, result)
         self._pending_episode_ids.remove(outcome.episode_id)
         self._model_log_directories.pop(outcome.episode_id, None)
