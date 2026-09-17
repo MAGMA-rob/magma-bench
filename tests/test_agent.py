@@ -4,6 +4,7 @@ import json
 import sys
 import subprocess
 import threading
+from unittest.mock import Mock
 
 import pytest
 import requests
@@ -237,12 +238,21 @@ def test_cli_uses_generic_options(monkeypatch):
     with pytest.raises(SystemExit):
         parse_args()
 
+    for video_mode in ("off", "all", "planner-failure"):
+        monkeypatch.setattr(sys, "argv", [
+            "magma-bench", "--benchmark-root", "/tmp/benchmark",
+            "--videos", video_mode,
+        ])
+        assert parse_args().videos == video_mode
+
     for invalid_args in (
         [],
         ["--benchmark-root", "/tmp/benchmark", "--save-dir", "a", "--results-path", "b"],
         ["--benchmark-root", "/tmp/benchmark", "--skip-judge", "--verifier-backend", "judge"],
         ["--benchmark-root", "/tmp/benchmark", "--agent-timeout", "0"],
         ["--benchmark-root", "/tmp/benchmark", "--nb-env", "0"],
+        ["--benchmark-root", "/tmp/benchmark", "--videos", "true"],
+        ["--benchmark-root", "/tmp/benchmark", "--videos"],
     ):
         monkeypatch.setattr(sys, "argv", ["magma-bench", *invalid_args])
         with pytest.raises(SystemExit):
@@ -266,6 +276,38 @@ def test_missing_verifier_backend_is_reported_before_agent_startup():
     )
     with pytest.raises(ValueError, match="--verifier-backend.*--skip-judge"):
         BenchmarkRunner(config)
+
+
+def test_episode_completion_logs_infrastructure_failure_once_as_warning():
+    from magma_bench.runner.runner import BenchmarkRunner
+
+    runner = BenchmarkRunner.__new__(BenchmarkRunner)
+    runner.result_manager = SimpleNamespace(record_episode=Mock())
+    runner._episode_started_at = {"infra": 0.0, "success": 0.0}
+    runner._progress_logger = SimpleNamespace(info=Mock(), warning=Mock())
+
+    infrastructure_failure = SimpleNamespace(
+        episode_id="infra",
+        success=False,
+        terminal=SimpleNamespace(
+            status="infrastructure_failure",
+            reason="planner retries exhausted",
+        ),
+    )
+    success = SimpleNamespace(
+        episode_id="success",
+        success=True,
+        terminal=SimpleNamespace(status="success", reason=None),
+    )
+
+    runner._record_episode_outcome(infrastructure_failure)
+    runner._record_episode_outcome(success)
+
+    runner._progress_logger.warning.assert_called_once()
+    runner._progress_logger.info.assert_called_once()
+    assert runner._progress_logger.warning.call_args.args[0].startswith(
+        "EPISODE_COMPLETED"
+    )
 
 
 def test_disabled_logs_do_not_collect_exchanges(agent, monkeypatch):

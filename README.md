@@ -53,7 +53,8 @@ Useful options include:
 magma-bench run --help
 magma-bench run --benchmark-root /path/to/benchmark --scenarios coffee_comp
 magma-bench run --benchmark-root /path/to/benchmark --skip-judge
-magma-bench run --benchmark-root /path/to/benchmark --model-logs --videos
+magma-bench run --benchmark-root /path/to/benchmark --model-logs --videos all
+magma-bench run --benchmark-root /path/to/benchmark --videos planner-failure
 ```
 
 Video output uses the optional dependencies:

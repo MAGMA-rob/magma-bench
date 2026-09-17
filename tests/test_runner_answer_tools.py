@@ -658,7 +658,14 @@ class FakeVideoWriter:
         self.path.write_bytes(b"fake-video")
 
 
-def _video_recorder(monkeypatch, tmp_path, frames, fps=2, hold_seconds=0.5):
+def _video_recorder(
+    monkeypatch,
+    tmp_path,
+    frames,
+    fps=2,
+    hold_seconds=0.5,
+    mode="all",
+):
     writers = []
 
     def write_frames(path, _size, **_kwargs):
@@ -672,7 +679,7 @@ def _video_recorder(monkeypatch, tmp_path, frames, fps=2, hold_seconds=0.5):
         SimpleNamespace(write_frames=write_frames),
     )
     recorder = EpisodeVideoRecorder(
-        VideoConfig(enabled=True, fps=fps, hold_seconds=hold_seconds)
+        VideoConfig(mode=mode, fps=fps, hold_seconds=hold_seconds)
     )
     video_directory = tmp_path / "videos"
     recorder.start_scenario(video_directory)
@@ -777,7 +784,9 @@ def test_video_recorder_holds_context_and_draws_planner_banner(
 
 
 def test_disabled_video_recorder_never_renders():
-    recorder = EpisodeVideoRecorder(VideoConfig(enabled=False))
+    config = VideoConfig()
+    assert config.mode == "off"
+    recorder = EpisodeVideoRecorder(config)
     environment = FakeRenderedEnvironment(None)
 
     recorder.bind_environment(environment)
@@ -789,8 +798,93 @@ def test_disabled_video_recorder_never_renders():
     assert environment.render_calls == 0
 
 
+@pytest.mark.parametrize("legacy_mode", [True, False])
+def test_video_config_rejects_legacy_boolean_modes(legacy_mode):
+    with pytest.raises(ValueError, match="videos must be one of"):
+        VideoConfig(mode=legacy_mode)
+
+
+@pytest.mark.parametrize("mode", ["all", "planner-failure"])
+def test_enabled_video_modes_accept_fps_options(mode):
+    config = VideoConfig(mode=mode, fps=12, hold_seconds=0.25)
+
+    assert config.fps == 12
+    assert config.hold_seconds == 0.25
+
+
+def test_planner_failure_video_records_retries_and_discards_resolved_attempts(
+    monkeypatch,
+    tmp_path,
+):
+    numpy = pytest.importorskip("numpy")
+    frames = numpy.zeros((1, 32, 48, 3), dtype=numpy.uint8)
+    recorder, environment, writers, video_directory = _video_recorder(
+        monkeypatch,
+        tmp_path,
+        frames,
+        mode="planner-failure",
+    )
+    recorder.start_episode(0, "episode", 0, "USER", "instruction")
+    recorder.update_instruction(0, 0, "USER", "instruction")
+    recorder.capture_physical_step([0])
+    recorder.flush_holds()
+
+    assert environment.render_calls == 0
+    assert writers == []
+
+    recorder.set_planner_retry(0, 1, 3, "first failure")
+    recorder.flush_holds()
+    recorder.capture_physical_step([0])
+
+    assert environment.render_calls == 2
+    assert len(writers) == 1
+
+    recorder.clear_planner_retry(0)
+
+    assert not (video_directory / ".episode.tmp.mp4").exists()
+    assert not (video_directory / "episode.mp4").exists()
+
+    recorder.set_planner_retry(0, 1, 3, "second failure")
+    recorder.flush_holds()
+    recorder.capture_physical_step([0])
+    recorder.finish_episode(0, "infrastructure_failure")
+
+    assert len(writers) == 2
+    assert (video_directory / "episode.mp4").is_file()
+    manifest = json.loads(
+        (video_directory / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert list(manifest["episodes"]) == ["episode"]
+    assert manifest["episodes"]["episode"]["terminal_status"] == (
+        "infrastructure_failure"
+    )
+
+
+def test_planner_failure_video_discards_non_infrastructure_terminal(
+    monkeypatch,
+    tmp_path,
+):
+    numpy = pytest.importorskip("numpy")
+    frames = numpy.zeros((1, 32, 48, 3), dtype=numpy.uint8)
+    recorder, _, writers, video_directory = _video_recorder(
+        monkeypatch,
+        tmp_path,
+        frames,
+        mode="planner-failure",
+    )
+    recorder.start_episode(0, "episode", 0, "USER", "instruction")
+    recorder.set_planner_retry(0, 1, 3, "temporary failure")
+    recorder.flush_holds()
+    recorder.finish_episode(0, "stage_failure")
+
+    assert len(writers) == 1
+    assert not (video_directory / ".episode.tmp.mp4").exists()
+    assert not (video_directory / "episode.mp4").exists()
+    assert not (video_directory / "manifest.json").exists()
+
+
 class FailingVideoRecorder:
-    config = VideoConfig(enabled=False)
+    config = VideoConfig(mode="off")
 
     def start_episode(self, *_args, **_kwargs):
         pass

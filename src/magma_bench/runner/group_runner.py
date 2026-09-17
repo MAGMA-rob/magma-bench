@@ -73,7 +73,7 @@ class GroupRunner:
         self.on_episode_started = on_episode_started
         self.on_model_diagnostics = on_model_diagnostics
         self.video_recorder = video_recorder or EpisodeVideoRecorder(
-            VideoConfig(enabled=False)
+            VideoConfig(mode="off")
         )
         self.episode_data_per_env: Dict[int, EpisodeData] = {}
         self.skill_managers: Dict[int, SkillManager] = {}
@@ -88,7 +88,7 @@ class GroupRunner:
             sim_backend=sim_backend,
             seed=seed,
         )
-        if self.video_recorder.config.enabled:
+        if self.video_recorder.config.mode != "off":
             self.video_recorder.bind_environment(executor_ref.env)
         for _ in range(executor_ref.nb_env):
             if not self._register_next_episode():

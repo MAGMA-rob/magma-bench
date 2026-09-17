@@ -85,9 +85,12 @@ def parse_args():
     parser.add_argument("--seed", type=int, help="The default start seed (default = 42)")
     parser.add_argument(
         "--videos",
-        action=argparse.BooleanOptionalAction,
+        choices=("off", "all", "planner-failure"),
         default=None,
-        help="Record one annotated MP4 per executed episode.",
+        help=(
+            "Video recording mode: off, all episodes, or only terminal "
+            "planner failures."
+        ),
     )
     parser.add_argument(
         "--model-logs",
@@ -181,12 +184,12 @@ def main(args : argparse.Namespace):
     magma_config.override_with_dict(override_dict)
     if args.planner_address is not None:
         magma_config.magma_planner_address = args.planner_address
-    if not bool(magma_config.benchmark.get("videos", False)) and (
+    if magma_config.benchmark.get("videos", "off") == "off" and (
         args.video_fps is not None or args.video_hold_seconds is not None
     ):
         raise ValueError(
-            "--video-fps and --video-hold-seconds require --videos or "
-            "benchmark.videos: true in the configuration."
+            "--video-fps and --video-hold-seconds require --videos all, "
+            "--videos planner-failure, or a matching configuration value."
         )
 
     runner = BenchmarkRunner(

@@ -61,7 +61,7 @@ class BenchmarkRunner:
         )
         self.video_recorder = EpisodeVideoRecorder(
             VideoConfig(
-                enabled=bool(benchmark_config.get("videos", False)),
+                mode=benchmark_config.get("videos", "off"),
                 fps=int(benchmark_config.get("video_fps", 20)),
                 hold_seconds=float(
                     benchmark_config.get("video_hold_seconds", 1.0)
@@ -117,7 +117,7 @@ class BenchmarkRunner:
             worker,
             nb_env=nb_env,
             skip_judge=skip_judge,
-            visual_assets=self.video_recorder.config.enabled,
+            visual_assets=self.video_recorder.config.mode != "off",
         )
 
     def load_benchmark(
@@ -142,7 +142,12 @@ class BenchmarkRunner:
         self.result_manager.record_episode(outcome)
         started_at = self._episode_started_at.pop(outcome.episode_id, None)
         elapsed = None if started_at is None else time.monotonic() - started_at
-        self._progress_logger.info(
+        log_episode_completed = (
+            self._progress_logger.warning
+            if outcome.terminal.status == "infrastructure_failure"
+            else self._progress_logger.info
+        )
+        log_episode_completed(
             "EPISODE_COMPLETED episode=%s success=%s status=%s duration_seconds=%s reason=%s",
             outcome.episode_id,
             outcome.success,
@@ -216,24 +221,6 @@ class BenchmarkRunner:
             tools_ended = self.tool_executor.verif_ended_tool(obs)
             for event in self.tool_executor.drain_planner_runtime_events():
                 if isinstance(event, PlannerRetryEvent):
-                    if event.tool_failures:
-                        tool_failure_messages = []
-                        for failure in event.tool_failures:
-                            reason = failure.reason.replace("\n", " ")
-                            tool_failure_messages.append(
-                                f"{failure.tool_name}: {reason}"
-                            )
-                        tool_failures = " | ".join(tool_failure_messages)
-                    else:
-                        reason = event.message.replace("\n", " ")
-                        tool_failures = f"unknown: {reason}"
-                    self._progress_logger.warning(
-                        "PLANNER_ERROR episode=%s attempt=%d/%d tools=[%s]",
-                        event.episode_id,
-                        event.attempt,
-                        event.max_attempts,
-                        tool_failures,
-                    )
                     self.video_recorder.set_planner_retry(
                         event.env_idx,
                         event.attempt,
@@ -282,7 +269,7 @@ class BenchmarkRunner:
             ):
                 if not self.result_manager.start_scenario(scenario):
                     continue
-                if self.video_recorder.config.enabled:
+                if self.video_recorder.config.mode != "off":
                     self.video_recorder.start_scenario(
                         self.result_manager.video_directory(scenario.scenario_id)
                     )
@@ -334,17 +321,9 @@ class BenchmarkRunner:
                     )
                     tqdm.write(message)
                     for failure in benchmark_result.infrastructure_failures:
-                        if failure.scenario_id != scenario_id:
-                            continue
-                        reason = (failure.reason or "unknown").replace("\n", " ")
-                        detail = f"  - {failure.episode_id}: {reason}"
-                        self._progress_logger.warning(
-                            "INFRASTRUCTURE_FAILURE scenario=%s episode=%s reason=%s",
-                            scenario_id,
-                            failure.episode_id,
-                            reason,
-                        )
-                        tqdm.write(detail)
+                        if failure.scenario_id == scenario_id:
+                            reason = (failure.reason or "unknown").replace("\n", " ")
+                            tqdm.write(f"  - {failure.episode_id}: {reason}")
         finally:
             try:
                 self.agent.stop()

@@ -7,19 +7,24 @@ import os
 from pathlib import Path
 import tempfile
 import textwrap
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Literal, Optional
 
 
 VIDEO_MANIFEST_SCHEMA_VERSION = "1.0"
+VideoMode = Literal["off", "all", "planner-failure"]
 
 
 @dataclass(frozen=True)
 class VideoConfig:
-    enabled: bool = False
+    mode: VideoMode = "off"
     fps: int = 20
     hold_seconds: float = 1.0
 
     def __post_init__(self) -> None:
+        if self.mode not in {"off", "all", "planner-failure"}:
+            raise ValueError(
+                "videos must be one of: off, all, planner-failure"
+            )
         if self.fps <= 0:
             raise ValueError("video_fps must be strictly positive")
         if self.hold_seconds <= 0:
@@ -44,6 +49,7 @@ class _VideoSession:
     frame_count: int = 0
     width: Optional[int] = None
     height: Optional[int] = None
+    recording: bool = False
 
 
 class EpisodeVideoRecorder:
@@ -64,7 +70,7 @@ class EpisodeVideoRecorder:
         self._numpy = None
         self._write_frames = None
 
-        if not config.enabled:
+        if config.mode == "off":
             return
         try:
             import numpy
@@ -84,7 +90,7 @@ class EpisodeVideoRecorder:
         self._write_frames = write_frames
 
     def start_scenario(self, video_directory: Path) -> None:
-        if not self.config.enabled:
+        if self.config.mode == "off":
             return
         if self._sessions:
             raise RuntimeError("Cannot change video scenario while episodes are active")
@@ -108,7 +114,7 @@ class EpisodeVideoRecorder:
             }
 
     def finish_scenario(self) -> None:
-        if not self.config.enabled:
+        if self.config.mode == "off":
             return
         if self._sessions:
             raise RuntimeError("Cannot finish video scenario while episodes are active")
@@ -116,7 +122,7 @@ class EpisodeVideoRecorder:
         self._video_directory = None
 
     def bind_environment(self, environment: Any) -> None:
-        if not self.config.enabled:
+        if self.config.mode == "off":
             return
         if self._sessions:
             raise RuntimeError("Cannot replace the rendered environment while episodes are active")
@@ -130,7 +136,7 @@ class EpisodeVideoRecorder:
         instruction_role: str,
         instruction_content: Any,
     ) -> None:
-        if not self.config.enabled:
+        if self.config.mode == "off":
             return
         if self._video_directory is None or self._environment is None:
             raise RuntimeError("Video scenario and environment must be initialized")
@@ -140,6 +146,9 @@ class EpisodeVideoRecorder:
         final_path = self._video_directory / f"{episode_id}.mp4"
         temporary_path = self._video_directory / f".{episode_id}.tmp.mp4"
         temporary_path.unlink(missing_ok=True)
+        final_path.unlink(missing_ok=True)
+        if self._manifest["episodes"].pop(episode_id, None) is not None:
+            self._write_manifest()
         self._sessions[env_idx] = _VideoSession(
             episode_id=episode_id,
             stage_index=stage_index,
@@ -149,6 +158,7 @@ class EpisodeVideoRecorder:
             ),
             temporary_path=temporary_path,
             final_path=final_path,
+            recording=self.config.mode == "all",
         )
 
     def update_instruction(
@@ -160,16 +170,16 @@ class EpisodeVideoRecorder:
         *,
         hold: bool = True,
     ) -> None:
-        if not self.config.enabled:
+        if self.config.mode == "off":
             return
         session = self._sessions[env_idx]
         session.stage_index = stage_index
         session.instruction = self._format_instruction(role, content)
-        if hold:
+        if hold and session.recording:
             session.pending_hold_frames += self._hold_frame_count()
 
     def update_answer(self, env_idx: int, answer: Any, *, hold: bool) -> None:
-        if not self.config.enabled:
+        if self.config.mode == "off":
             return
         session = self._sessions[env_idx]
         say = answer.get_say()
@@ -189,7 +199,7 @@ class EpisodeVideoRecorder:
                 )
             session.activity_label = "Current action"
             session.activity = "\n".join(lines) if lines else "No tool call"
-        if hold:
+        if hold and session.recording:
             session.pending_hold_frames += self._hold_frame_count()
 
     def set_planner_retry(
@@ -199,29 +209,36 @@ class EpisodeVideoRecorder:
         max_attempts: int,
         message: str,
     ) -> None:
-        if not self.config.enabled:
+        if self.config.mode == "off":
             return
         session = self._sessions.get(env_idx)
         if session is None:
             return
+        session.recording = True
         session.planner_attempt = attempt
         session.planner_max_attempts = max_attempts
         session.planner_message = message
         session.pending_hold_frames += self._hold_frame_count()
 
     def clear_planner_retry(self, env_idx: int) -> None:
-        if not self.config.enabled:
+        if self.config.mode == "off":
             return
         session = self._sessions.get(env_idx)
         if session is None:
             return
+        if self.config.mode == "planner-failure":
+            self._discard_recording(session)
         session.planner_attempt = None
         session.planner_message = ""
 
     def capture_physical_step(self, env_ids: Iterable[int]) -> None:
-        if not self.config.enabled:
+        if self.config.mode == "off":
             return
-        selected = [env_idx for env_idx in env_ids if env_idx in self._sessions]
+        selected = [
+            env_idx
+            for env_idx in env_ids
+            if env_idx in self._sessions and self._sessions[env_idx].recording
+        ]
         if not selected:
             return
         frames = self._render_batch()
@@ -232,7 +249,7 @@ class EpisodeVideoRecorder:
             self._write_annotated_frame(session, raw_frame)
 
     def flush_holds(self, env_ids: Optional[Iterable[int]] = None) -> None:
-        if not self.config.enabled:
+        if self.config.mode == "off":
             return
         selected_ids = (
             set(self._sessions)
@@ -242,7 +259,8 @@ class EpisodeVideoRecorder:
         pending_ids = [
             env_idx
             for env_idx in selected_ids
-            if self._sessions[env_idx].pending_hold_frames > 0
+            if self._sessions[env_idx].recording
+            and self._sessions[env_idx].pending_hold_frames > 0
         ]
         if not pending_ids:
             return
@@ -269,12 +287,25 @@ class EpisodeVideoRecorder:
                 self._write_frame(session, frame)
 
     def finish_episode(self, env_idx: int, terminal_status: str) -> None:
-        if not self.config.enabled:
+        if self.config.mode == "off":
             return
         session = self._sessions.get(env_idx)
         if session is None:
             raise RuntimeError(f"Environment {env_idx} has no active video session")
 
+        publish = (
+            self.config.mode == "all"
+            or (
+                terminal_status == "infrastructure_failure"
+                and session.recording
+            )
+        )
+        if not publish:
+            self._discard_recording(session)
+            self._sessions.pop(env_idx)
+            return
+
+        session.recording = True
         self.flush_holds([env_idx])
         if session.writer is None:
             frames = self._render_batch()
@@ -302,7 +333,7 @@ class EpisodeVideoRecorder:
         self._sessions.pop(env_idx)
 
     def close(self) -> None:
-        if not self.config.enabled:
+        if self.config.mode == "off":
             return
         for session in list(self._sessions.values()):
             if session.writer is not None:
@@ -315,6 +346,19 @@ class EpisodeVideoRecorder:
         self._sessions.clear()
         self._environment = None
         self._video_directory = None
+
+    def _discard_recording(self, session: _VideoSession) -> None:
+        if session.writer is not None:
+            session.writer.close()
+            session.writer = None
+        if session.temporary_path is not None:
+            session.temporary_path.unlink(missing_ok=True)
+        session.recording = False
+        session.pending_hold_frames = 0
+        session.last_raw_frame = None
+        session.frame_count = 0
+        session.width = None
+        session.height = None
 
     def _render_batch(self) -> Any:
         if self._environment is None:
