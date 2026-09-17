@@ -124,17 +124,18 @@ class BenchmarkAgent:
                 reason=response.error.message,
             )
         assert response.output is not None
+        calls = [
+            Call(
+                name=call.name,
+                arguments=deepcopy(call.arguments),
+                target_robot_name=call.target_robot_name,
+            )
+            for call in response.output.tool_calls
+        ]
         return ValidAgentAnswer(
             source_node_id=response.source_id, agent_step_id=agent_step_id,
-            say=response.output.say,
-            calls=[
-                Call(
-                    name=call.name,
-                    arguments=deepcopy(call.arguments),
-                    target_robot_name=call.target_robot_name,
-                )
-                for call in response.output.tool_calls
-            ],
+            say="" if calls else response.output.say,
+            calls=calls,
         )
 
     def get_agent_card(self) -> Dict[str, Any]:

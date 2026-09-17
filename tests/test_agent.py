@@ -123,7 +123,7 @@ def test_candidate_error_keeps_memory_and_logs(agent, monkeypatch):
     }]
 
 
-@pytest.mark.parametrize("change", ["request", "source", "candidate", "missing", "duplicate", "order", "decision"])
+@pytest.mark.parametrize("change", ["request", "source", "candidate", "missing", "duplicate", "order"])
 def test_invalid_wire_response_is_infrastructure_error(agent, monkeypatch, change):
     def transform(outputs):
         if change == "request": outputs[0]["request_id"] = "wrong"
@@ -132,10 +132,23 @@ def test_invalid_wire_response_is_infrastructure_error(agent, monkeypatch, chang
         elif change == "missing": outputs.pop()
         elif change == "duplicate": outputs.append(outputs[0])
         elif change == "order": outputs.reverse()
-        else: outputs[0]["output"] = {"say": "x", "tool_calls": [{"name": "x", "target_robot_name": "left"}]}
     install_response(monkeypatch, transform)
     with pytest.raises(ValueError):
         agent.compute_agent_results({0: situation(), 1: situation()})
+
+
+def test_tool_calls_take_priority_over_say(agent, monkeypatch):
+    def transform(outputs):
+        outputs[0]["output"] = {
+            "say": "I will pick it.",
+            "tool_calls": [{"name": "pick", "target_robot_name": "left"}],
+        }
+
+    install_response(monkeypatch, transform)
+    answer = agent.compute_agent_results({0: situation()})[0].answer
+
+    assert answer.get_say() == ""
+    assert [call.name for call in answer.get_action()] == ["pick"]
 
 
 def test_http_error_propagates(agent, monkeypatch):
