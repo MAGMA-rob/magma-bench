@@ -3,13 +3,13 @@
 
 [project]
 name = "magma_bench"
-version = "2.0.0b3"
+version = "2.0.0b4"
 description = "Evaluate agents on interactive robotic tasks with MAGMA"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
 classifiers = ["Development Status :: 4 - Beta"]
 dependencies = [
-    "magma_core[simulation]>=2.0.0b1,<3.0.0",
+    "magma_core[simulation]>=2.0.0b3,<3.0.0",
     "magma_scenarios>=2.0.1,<3.0.0",
     "packaging>=24,<27",
     "pydantic>=2.4,<3",
