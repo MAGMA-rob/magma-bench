@@ -39,6 +39,7 @@ Start a compatible MAGMA agent server, then run a compiled benchmark directory:
 ```bash
 magma-bench run \
   --benchmark-root /path/to/compiled-benchmark \
+  --results-path /path/to/results/experiment-1 \
   --agent-address http://127.0.0.1:8888 \
   --run-name experiment-1
 ```
@@ -51,10 +52,10 @@ Useful options include:
 
 ```bash
 magma-bench run --help
-magma-bench run --benchmark-root /path/to/benchmark --scenarios coffee_comp
-magma-bench run --benchmark-root /path/to/benchmark --skip-judge
-magma-bench run --benchmark-root /path/to/benchmark --model-logs --videos all
-magma-bench run --benchmark-root /path/to/benchmark --videos planner-failure
+magma-bench run --benchmark-root /path/to/benchmark --results-path ./eval/coffee --scenarios coffee_comp
+magma-bench run --benchmark-root /path/to/benchmark --results-path ./eval/no-judge --skip-judge
+magma-bench run --benchmark-root /path/to/benchmark --results-path ./eval/logged --model-logs --videos all
+magma-bench run --benchmark-root /path/to/benchmark --results-path ./eval/failures --videos planner-failure
 ```
 
 Video output uses the optional dependencies:

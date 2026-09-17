@@ -159,6 +159,38 @@ class ExecutionIdentity(ResultModel):
     seed: int = 0
 
 
+class ResumeAgentIdentity(ResultModel):
+    agent_id: str
+    agent_version: str
+    protocol_version: str
+    extra_keys: Dict[str, Any]
+
+
+class RunResumeIdentity(ResultModel):
+    """Fields that must remain compatible when continuing an existing run."""
+
+    benchmark_version: str
+    benchmark_fingerprint: str
+    agent: ResumeAgentIdentity
+    scenario_ids: List[str]
+    execution: ExecutionIdentity
+
+    @classmethod
+    def from_manifest(cls, manifest: "RunManifest") -> "RunResumeIdentity":
+        return cls(
+            benchmark_version=manifest.benchmark_version,
+            benchmark_fingerprint=manifest.benchmark_fingerprint,
+            agent=ResumeAgentIdentity(
+                agent_id=manifest.agent.agent_id,
+                agent_version=manifest.agent.agent_version,
+                protocol_version=manifest.agent.protocol_version,
+                extra_keys=manifest.agent.extra_keys,
+            ),
+            scenario_ids=manifest.scenario_ids,
+            execution=manifest.execution,
+        )
+
+
 class RunManifest(ResultModel):
     schema_version: Literal["2.0"] = RESULT_SCHEMA_VERSION
     benchmark_version: str

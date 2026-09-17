@@ -503,7 +503,7 @@ def test_result_manager_writes_available_terminal_diagnostics(tmp_path):
             assert fragment in text
 
 
-def test_result_manager_replays_partial_and_rejects_incompatible_agent(tmp_path):
+def test_result_manager_replays_partial_and_ignores_run_name(tmp_path):
     benchmark_root, scenario, agent = _manager_fixture(tmp_path)
     results_path = tmp_path / "results"
     manager = ResultManager(results_path, benchmark_root, agent, [scenario])
@@ -521,10 +521,9 @@ def test_result_manager_replays_partial_and_rejects_incompatible_agent(tmp_path)
     assert len(resumed.pending_episode_ids("scenario_a")) == 19
     assert (resumed.video_directory("scenario_a") / "preserved.mp4").is_file()
 
-    incompatible = dict(agent)
-    incompatible["agent"] = "another-agent"
-    with pytest.raises(ValueError, match="incompatible"):
-        ResultManager(results_path, benchmark_root, incompatible, [scenario])
+    renamed = dict(agent)
+    renamed["agent"] = "another-run-name"
+    ResultManager(results_path, benchmark_root, renamed, [scenario])
 
 
 def test_result_manager_keeps_infrastructure_failure_partial(tmp_path):
@@ -599,7 +598,7 @@ def test_result_manager_rejects_runtime_identity_changes(tmp_path):
         seed=17,
     )
 
-    with pytest.raises(ValueError, match="incompatible"):
+    with pytest.raises(ValueError, match="execution.judge_mode"):
         ResultManager(
             results_path,
             benchmark_root,
@@ -615,8 +614,30 @@ def test_result_manager_rejects_runtime_identity_changes(tmp_path):
 def test_resume_rejects_changed_runtime_configuration(tmp_path, field, value):
     benchmark_root, scenario, agent = _manager_fixture(tmp_path)
     ResultManager(tmp_path / "results", benchmark_root, agent, [scenario])
-    with pytest.raises(ValueError, match="incompatible"):
+    with pytest.raises(ValueError, match=field):
         ResultManager(tmp_path / "results", benchmark_root, {**agent, field: value}, [scenario])
+
+
+def test_resume_accepts_beta_serial_change(tmp_path):
+    benchmark_root, scenario, agent = _manager_fixture(tmp_path)
+    first_beta = {**agent, "agent_version": "2.0.0b1"}
+    next_beta = {**agent, "agent_version": "2.0.0b3"}
+    ResultManager(tmp_path / "results", benchmark_root, first_beta, [scenario])
+
+    ResultManager(tmp_path / "results", benchmark_root, next_beta, [scenario])
+
+    (benchmark_root / "benchmark.json").write_text(
+        json.dumps({"benchmark_version": "2.0.0b1"}),
+        encoding="utf-8",
+    )
+    benchmark_results = tmp_path / "benchmark-results"
+    ResultManager(benchmark_results, benchmark_root, agent, [scenario])
+    (benchmark_root / "benchmark.json").write_text(
+        json.dumps({"benchmark_version": "2.0.0b3"}),
+        encoding="utf-8",
+    )
+
+    ResultManager(benchmark_results, benchmark_root, agent, [scenario])
 
 
 def test_old_result_schema_is_rejected():

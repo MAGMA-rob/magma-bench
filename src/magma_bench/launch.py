@@ -65,15 +65,10 @@ def parse_args():
         choices=("auto", "cpu", "gpu"),
         help="Simulation backend.",
     )
-    output = parser.add_mutually_exclusive_group()
-    output.add_argument(
-        '--save-dir',
-        type=Path,
-        help="Root directory for a new timestamped benchmark run.",
-    )
-    output.add_argument(
+    parser.add_argument(
         '--results-path',
         type=Path,
+        required=True,
         help="Exact result directory to create or resume.",
     )
     parser.add_argument(
@@ -146,6 +141,8 @@ def build_override_dict(args):
             continue
         if key == "agent_address":
             overrides["magma_agent_address"] = value
+        elif key == "agent_timeout":
+            overrides["magma_agent_timeout"] = value
         else:
             overrides["benchmark"][key] = value
 

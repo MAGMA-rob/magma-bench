@@ -8,6 +8,8 @@ from pathlib import Path
 import tempfile
 from typing import Any, Dict, List, Literal, Optional, Sequence, Set
 
+from packaging.version import InvalidVersion, Version
+
 from magma_bench.artifacts import BenchmarkManifest, load_json_model
 from magma_bench.data_structures import Episode, Scenario
 
@@ -21,6 +23,7 @@ from .models import (
     InfrastructureFailure,
     MetricsPayload,
     RunManifest,
+    RunResumeIdentity,
     ScenarioResult,
 )
 
@@ -46,8 +49,13 @@ def _compute_metrics_by_track(
     return metrics_by_track
 
 
-def benchmark_fingerprint(root: Path, manifest: BenchmarkManifest) -> str:
-    """Hash the manifest and every artifact it transitively indexes."""
+def benchmark_fingerprint(
+    root: Path,
+    manifest: BenchmarkManifest,
+    *,
+    include_benchmark_version: bool = False,
+) -> str:
+    """Hash indexed artifacts independently from the declared release version."""
 
     digest = hashlib.sha256()
     relative_paths = {Path("benchmark.json")}
@@ -68,9 +76,76 @@ def benchmark_fingerprint(root: Path, manifest: BenchmarkManifest) -> str:
         relative = str(path.relative_to(root)).replace(os.sep, "/")
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
-        digest.update(path.read_bytes())
+        payload = path.read_bytes()
+        if relative_path == Path("benchmark.json") and not include_benchmark_version:
+            benchmark_payload = json.loads(payload)
+            benchmark_payload.pop("benchmark_version", None)
+            payload = json.dumps(
+                benchmark_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        digest.update(payload)
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _resume_version(version: str) -> str:
+    """Ignore only the serial number that distinguishes beta releases."""
+
+    try:
+        parsed = Version(version)
+    except InvalidVersion:
+        return version
+    if parsed.pre is None or parsed.pre[0] != "b":
+        return str(parsed)
+    release = ".".join(str(component) for component in parsed.release)
+    epoch = f"{parsed.epoch}!" if parsed.epoch else ""
+    post = f".post{parsed.post}" if parsed.post is not None else ""
+    dev = f".dev{parsed.dev}" if parsed.dev is not None else ""
+    local = f"+{parsed.local}" if parsed.local is not None else ""
+    return f"{epoch}{release}b{post}{dev}{local}"
+
+
+def _resume_identity_differences(
+    stored: RunResumeIdentity,
+    current: RunResumeIdentity,
+) -> List[str]:
+    stored_values = stored.model_dump(mode="json")
+    current_values = current.model_dump(mode="json")
+    differences = []
+    missing = object()
+
+    def compare(stored_value: Any, current_value: Any, path: str) -> None:
+        if isinstance(stored_value, dict) and isinstance(current_value, dict):
+            for key in sorted(stored_value.keys() | current_value.keys()):
+                child_path = f"{path}.{key}" if path else key
+                compare(
+                    stored_value.get(key, missing),
+                    current_value.get(key, missing),
+                    child_path,
+                )
+            return
+
+        values_match = stored_value == current_value
+        if path in {"benchmark_version", "agent.agent_version"}:
+            values_match = _resume_version(stored_value) == _resume_version(
+                current_value
+            )
+        if not values_match:
+            stored_display = (
+                "<missing>" if stored_value is missing else repr(stored_value)
+            )
+            current_display = (
+                "<missing>" if current_value is missing else repr(current_value)
+            )
+            differences.append(
+                f"{path}: stored={stored_display}, current={current_display}"
+            )
+
+    compare(stored_values, current_values, "")
+    return differences
 
 
 def _write_model_atomic(path: Path, model) -> None:
@@ -177,6 +252,11 @@ class ResultManager:
                 seed=seed,
             ),
         )
+        self._legacy_benchmark_fingerprint = benchmark_fingerprint(
+            self.benchmark_root,
+            manifest_model,
+            include_benchmark_version=True,
+        )
         self.active_scenario_id: Optional[str] = None
         self._pending_episode_ids: Set[str] = set()
         self._initialize_run()
@@ -191,13 +271,22 @@ class ResultManager:
             existing = RunManifest.model_validate_json(
                 run_path.read_text(encoding="utf-8")
             )
-            expected = self.run_manifest.model_copy(
-                update={"created_at": existing.created_at}
+            current_manifest = self.run_manifest
+            if existing.benchmark_fingerprint == self._legacy_benchmark_fingerprint:
+                current_manifest = current_manifest.model_copy(
+                    update={
+                        "benchmark_fingerprint": existing.benchmark_fingerprint,
+                    }
+                )
+            differences = _resume_identity_differences(
+                RunResumeIdentity.from_manifest(existing),
+                RunResumeIdentity.from_manifest(current_manifest),
             )
-            if existing != expected:
+            if differences:
+                details = "\n- ".join(differences)
                 raise ValueError(
-                    "Existing results are incompatible with the selected "
-                    "benchmark or agent"
+                    "Existing results cannot be resumed because these keys differ:\n"
+                    f"- {details}"
                 )
         else:
             if self.results_path.exists() and any(self.results_path.iterdir()):

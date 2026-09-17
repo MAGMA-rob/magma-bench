@@ -1,4 +1,5 @@
 from copy import deepcopy
+from pathlib import Path
 from types import SimpleNamespace
 import json
 import sys
@@ -213,6 +214,7 @@ def test_cli_uses_generic_options(monkeypatch):
     from magma_bench.launch import build_override_dict, parse_args
     monkeypatch.setattr(sys, "argv", [
         "magma-bench", "--benchmark-root", "/tmp/benchmark",
+        "--results-path", "/tmp/results",
         "--agent-address", "http://example", "--run-name", "experiment",
         "--planner-address", "http://planner", "--verifier-backend", "judge",
         "--agent-timeout", "120", "--nb-env", "4",
@@ -224,11 +226,12 @@ def test_cli_uses_generic_options(monkeypatch):
     assert args.extra_keys == {"inference_mode": False}
     assert build_override_dict(args) == {
         "magma_agent_address": "http://example",
+        "magma_agent_timeout": 120,
         "benchmark": {
-            "agent_timeout": 120,
             "backend_verifier": "judge",
             "deterministic_decoding": False,
             "nb_env": 4,
+            "results_path": Path("/tmp/results"),
         },
     }
     monkeypatch.setattr(sys, "argv", [
@@ -241,6 +244,7 @@ def test_cli_uses_generic_options(monkeypatch):
     for video_mode in ("off", "all", "planner-failure"):
         monkeypatch.setattr(sys, "argv", [
             "magma-bench", "--benchmark-root", "/tmp/benchmark",
+            "--results-path", "/tmp/results",
             "--videos", video_mode,
         ])
         assert parse_args().videos == video_mode
@@ -248,11 +252,11 @@ def test_cli_uses_generic_options(monkeypatch):
     for invalid_args in (
         [],
         ["--benchmark-root", "/tmp/benchmark", "--save-dir", "a", "--results-path", "b"],
-        ["--benchmark-root", "/tmp/benchmark", "--skip-judge", "--verifier-backend", "judge"],
-        ["--benchmark-root", "/tmp/benchmark", "--agent-timeout", "0"],
-        ["--benchmark-root", "/tmp/benchmark", "--nb-env", "0"],
-        ["--benchmark-root", "/tmp/benchmark", "--videos", "true"],
-        ["--benchmark-root", "/tmp/benchmark", "--videos"],
+        ["--benchmark-root", "/tmp/benchmark", "--results-path", "b", "--skip-judge", "--verifier-backend", "judge"],
+        ["--benchmark-root", "/tmp/benchmark", "--results-path", "b", "--agent-timeout", "0"],
+        ["--benchmark-root", "/tmp/benchmark", "--results-path", "b", "--nb-env", "0"],
+        ["--benchmark-root", "/tmp/benchmark", "--results-path", "b", "--videos", "true"],
+        ["--benchmark-root", "/tmp/benchmark", "--results-path", "b", "--videos"],
     ):
         monkeypatch.setattr(sys, "argv", ["magma-bench", *invalid_args])
         with pytest.raises(SystemExit):
@@ -261,7 +265,10 @@ def test_cli_uses_generic_options(monkeypatch):
 
 def test_conflicting_decoding_options_rejected_before_startup():
     from magma_bench.runner.runner import BenchmarkRunner
-    config = SimpleNamespace(benchmark={"deterministic_decoding": True})
+    config = SimpleNamespace(
+        benchmark={"deterministic_decoding": True},
+        magma_agent_timeout=360,
+    )
     with pytest.raises(ValueError, match="conflicts"):
         BenchmarkRunner(config, extra_keys={"inference_mode": False}, skip_judge=True)
 
@@ -272,6 +279,7 @@ def test_missing_verifier_backend_is_reported_before_agent_startup():
         benchmark={},
         backends={},
         magma_agent_address="http://example",
+        magma_agent_timeout=360,
         magma_planner_address="http://planner",
     )
     with pytest.raises(ValueError, match="--verifier-backend.*--skip-judge"):

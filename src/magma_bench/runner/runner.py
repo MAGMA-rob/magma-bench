@@ -1,5 +1,4 @@
 import time
-from datetime import datetime
 import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Union
@@ -36,9 +35,9 @@ class BenchmarkRunner:
     ) -> None:
         benchmark_config = magma_config.benchmark
         self._skip_judge = skip_judge
-        agent_timeout = float(benchmark_config.get("agent_timeout", 360))
+        agent_timeout = float(magma_config.magma_agent_timeout)
         if agent_timeout <= 0:
-            raise ValueError("benchmark.agent_timeout must be strictly positive")
+            raise ValueError("magma_agent_timeout must be strictly positive")
         nb_env = int(benchmark_config.get("nb_env", 1))
         if nb_env <= 0:
             raise ValueError("benchmark.nb_env must be strictly positive")
@@ -174,14 +173,8 @@ class BenchmarkRunner:
             raise RuntimeError("Benchmark root is not available")
         configured_path = self._benchmark_config.get("results_path")
         if configured_path is None:
-            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            results_path = (
-                Path(self._benchmark_config.get("save_dir", "eval"))
-                / self.agent.agent_name
-                / timestamp
-            )
-        else:
-            results_path = Path(configured_path)
+            raise ValueError("benchmark.results_path is required")
+        results_path = Path(configured_path)
         return ResultManager(
             results_path=results_path,
             benchmark_root=self._benchmark_root,
