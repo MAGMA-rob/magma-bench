@@ -7,6 +7,21 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [2.0.0b5] - 2026-09-18
+
+### Added
+
+- Added artifact schema `1.7` with an explicit `text_only_validation` mode for
+  declarative stages while retaining support for schema versions `1.5` and
+  `1.6`.
+
+### Fixed
+
+- Made `say_only` completion stages accept a non-empty completion message
+  locally, advance normally to the next stage, and avoid submitting the answer
+  to the judge backend.
+- Rejected `say_only` validation on action stages during artifact validation.
+
 ## [2.0.0b4] - 2026-09-17
 
 ### Added
@@ -52,7 +67,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 - Published the first v2 beta.
 
-[Unreleased]: https://github.com/MAGMA-rob/magma-bench/compare/v2.0.0b4...HEAD
+[Unreleased]: https://github.com/MAGMA-rob/magma-bench/compare/v2.0.0b5...HEAD
+[2.0.0b5]: https://github.com/MAGMA-rob/magma-bench/compare/v2.0.0b4...v2.0.0b5
 [2.0.0b4]: https://github.com/MAGMA-rob/magma-bench/compare/v2.0.0b3...v2.0.0b4
 [2.0.0b3]: https://github.com/MAGMA-rob/magma-bench/compare/v2.0.0b2...v2.0.0b3
 [2.0.0b2]: https://github.com/MAGMA-rob/magma-bench/compare/v2.0.0b1...v2.0.0b2

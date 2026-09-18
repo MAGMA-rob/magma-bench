@@ -3,7 +3,7 @@
 
 [project]
 name = "magma_bench"
-version = "2.0.0b4"
+version = "2.0.0b5"
 description = "Evaluate agents on interactive robotic tasks with MAGMA"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
