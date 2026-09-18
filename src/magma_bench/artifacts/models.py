@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-SCHEMA_VERSION = "1.6"
+SCHEMA_VERSION = "1.7"
 Track = Literal["in_domain", "held_out_domain", "compositional"]
 Condition = Literal[
     "clean",
@@ -28,7 +28,7 @@ Condition = Literal[
     "execution_error",
     "combined",
 ]
-ArtifactSchemaVersion = Literal["1.5", "1.6"]
+ArtifactSchemaVersion = Literal["1.5", "1.6", "1.7"]
 VariantCondition = Literal[
     "mission_update",
     "interruption",
@@ -96,8 +96,13 @@ class SkeletonManifest(StrictModel):
 
     @model_validator(mode="after")
     def validate_range(self) -> "SkeletonManifest":
-        if self.schema_version == "1.6" and "conditions" not in self.model_fields_set:
-            raise ValueError("Schema 1.6 skeletons must declare conditions")
+        if (
+            self.schema_version in {"1.6", "1.7"}
+            and "conditions" not in self.model_fields_set
+        ):
+            raise ValueError(
+                f"Schema {self.schema_version} skeletons must declare conditions"
+            )
         if len(self.requested_tool_call_range) != 2:
             raise ValueError("requested_tool_call_range must contain [minimum, maximum]")
         if self.requested_tool_call_range[0] > self.requested_tool_call_range[1]:
@@ -188,6 +193,7 @@ class DeclarativeStageSpec(StrictModel):
     max_tool_calls: int = Field(ge=0)
     reset_environment_after: bool = False
     additive: bool = False
+    text_only_validation: Literal["judge", "say_only"] = "judge"
     allow_tools_before_answer: bool = False
     allowed_tools: List[str] = Field(default_factory=list)
     goals: List[ObjectSpec] = Field(default_factory=list)
@@ -201,6 +207,8 @@ class DeclarativeStageSpec(StrictModel):
         prompt = self.presentation.verification_prompt
         if self.type == "act" and prompt is not None:
             raise ValueError("An act stage cannot define a verification prompt")
+        if self.type == "act" and self.text_only_validation != "judge":
+            raise ValueError("An act stage cannot use say-only validation")
         if self.type in {"answer", "acknowledge"} and prompt is None:
             raise ValueError(f"A {self.type} stage must define a verification prompt")
         if self.type in {"answer", "acknowledge"} and self.goals:

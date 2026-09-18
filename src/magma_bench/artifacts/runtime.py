@@ -18,6 +18,7 @@ from magma_core.simulation.stage import (
     BaseTaskStage,
     StageErrorParameters,
     StageGlobalParameters,
+    TextOnlyValidationMode,
 )
 from magma_core.simulation.tasks import BaseTask
 from magma_core.simulation.serialization import canonical_type_name, decode_value, encode_value
@@ -182,6 +183,9 @@ class DeclarativeStage(BaseTaskStage):
                 reset_at_end=spec.reset_environment_after,
                 additive_stage=spec.additive,
                 verification_prompt=presentation.verification_prompt,
+                text_only_validation=TextOnlyValidationMode(
+                    spec.text_only_validation
+                ),
                 allow_tools_before_answer=spec.allow_tools_before_answer,
                 allowed_tools=list(spec.allowed_tools),
             ),

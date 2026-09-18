@@ -31,6 +31,7 @@ from magma_core.simulation.skills import SkillExecutionContext
 from magma_core.simulation.skills.skill_manager import SkillAPIProvider
 from magma_core.protocol.payload.user_sim_payload import JudgePayload
 from magma_core.simulation.serialization import decode_value
+from magma_core.simulation.stage import TextOnlyValidationMode
 from magma_core.utils.global_utils import (
     apply_env_state_updates,
     batch_set_value,
@@ -275,7 +276,13 @@ class ToolsEvalExecutor(ToolsBaseExecutor):
                         "The agent returned a message while this stage requires an action.",
                     )
                     continue
-                if self.skip_judge:
+                validation_mode = context.task_ref.get_stage_text_only_validation(
+                    stage_id
+                )
+                if (
+                    validation_mode is TextOnlyValidationMode.SAY_ONLY
+                    or self.skip_judge
+                ):
                     context.judge_pending = True
                     self._store_judge_verdict(
                         env_idx,
